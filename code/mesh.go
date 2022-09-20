@@ -13,20 +13,51 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 )
 
 import (
 	"github.com/gorilla/mux"
 )
 
+type PSKEntry struct {
+	Type string
+	Psk  string
+}
+
+type DeviceEntry struct {
+	Name       string
+	MAC        string
+	WGPubKey   string
+	VLANTag    string
+	RecentIP   string
+	PSKEntry   PSKEntry
+	Groups     []string
+	DeviceTags []string
+}
+
 var TEST_PREFIX = os.Getenv("TEST_PREFIX")
 var UNIX_PLUGIN_LISTENER = TEST_PREFIX + "/state/plugins/mesh/socket"
 var FirewallConfigFile = TEST_PREFIX + "/configs/mesh/rules.json"
+
+var Configmtx sync.RWMutex
+
+type LeafRouter struct {
+	APIToken string
+	IP       string
+}
+
+type MeshConfig struct {
+	LeafRouters []LeafRouter
+}
+
+var MeshConfigFile = TEST_PREFIX + "/configs/mesh/config.json"
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +66,36 @@ func logRequest(handler http.Handler) http.Handler {
 	})
 }
 
+func loadConfigLocked() MeshConfig {
+	config := MeshConfig{}
+	data, err := ioutil.ReadFile(MeshConfigFile)
+	if err != nil {
+		fmt.Println("failed to read config file", err)
+	} else {
+		err := json.Unmarshal(data, &config)
+		if err != nil {
+			fmt.Println("failed to decode", err)
+		}
+	}
+	return config
+}
+
+func saveConfigLocked(config MeshConfig) {
+  file, _ := json.MarshalIndent(config, "", " ")
+  err := ioutil.WriteFile(MeshConfigFile, file, 0600)
+  if err != nil {
+          fmt.Println(err)
+  }
+}
+
+
 func getMeshConfig(w http.ResponseWriter, r *http.Request) {
+	Configmtx.Lock()
+	config := loadConfigLocked()
+	Configmtx.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(config)
 }
 
 func initMesh() {
@@ -108,8 +168,8 @@ func updateBridgeAccess(action string, iface string, mac string) {
 
 type WifiConnectEvent struct {
 	Action string
-	Iface string
-	Mac string
+	Iface  string
+	Mac    string
 }
 
 func wifiConnect(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +186,7 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
-	//A device connected. Add the interface to the bridge,
+	//A device disconnected, update bridge_access. Add the interface to the bridge,
 	// and then add it to the bridge_access nft
 
 	event := WifiConnectEvent{}
@@ -139,6 +199,93 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 }
 
 
+func callAPIDeviceSync(IP string, Token string, devices map[string]DeviceEntry) {
+
+}
+
+func syncDevices(w http.ResponseWriter, r *http.Request) {
+	devices := map[string]DeviceEntry{}
+	err := json.NewDecoder(r.Body).Decode(&devices)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	Configmtx.Lock()
+	defer Configmtx.Unlock()
+
+	//for each subscribed leaf node, sync the devices
+	config := loadConfigLocked()
+	for _, entry := range config.LeafRouters {
+		callAPIDeviceSync(entry.IP, entry.APIToken, devices)
+	}
+
+}
+
+func callAPISetSSID(IP string, Token string, SSID string) {
+
+}
+
+func setSSID(w http.ResponseWriter, r *http.Request) {
+	SSID := ""
+	err := json.NewDecoder(r.Body).Decode(&SSID)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	Configmtx.Lock()
+	defer Configmtx.Unlock()
+	//for each subscribed leaf node, set the ssid
+	config := loadConfigLocked()
+	for _, entry := range config.LeafRouters {
+		callAPISetSSID(entry.IP, entry.APIToken, SSID)
+	}
+
+}
+
+func leafRouters(w http.ResponseWriter, r *http.Request) {
+	Configmtx.Lock()
+	defer Configmtx.Unlock()
+	config := loadConfigLocked()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(config.LeafRouters)
+}
+
+func leafRouter(w http.ResponseWriter, r *http.Request) {
+	Configmtx.Lock()
+	defer Configmtx.Unlock()
+	config := loadConfigLocked()
+
+	entry := LeafRouter{}
+	err := json.NewDecoder(r.Body).Decode(&entry)
+	if err == nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	newLeaves := []LeafRouter{}
+
+	//delete any partial matches in the existing list
+	for _, existing := range config.LeafRouters {
+		//match on either IP or API Token, and then delete it
+		if existing.IP == entry.IP || existing.APIToken == entry.APIToken {
+			continue
+		} else {
+			newLeaves = append(newLeaves, existing)
+		}
+	}
+
+	if r.Method == http.MethodPut {
+		//add the new entry
+		newLeaves = append(newLeaves, entry)
+	}
+
+	//save it
+	config.LeafRouters = newLeaves
+	saveConfigLocked(config)
+
+}
+
 func main() {
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
@@ -147,7 +294,11 @@ func main() {
 	//good use case for event bus
 	unix_plugin_router.HandleFunc("/stationConnect", wifiConnect).Methods("PUT")
 	unix_plugin_router.HandleFunc("/stationDisconnect", wifiDisconnect).Methods("PUT")
+	unix_plugin_router.HandleFunc("/syncDevice", syncDevices).Methods("PUT")
+	unix_plugin_router.HandleFunc("/setSSID", setSSID).Methods("PUT")
 
+	unix_plugin_router.HandleFunc("/leafRouters", leafRouters).Methods("GE")
+	unix_plugin_router.HandleFunc("/leafRouter", leafRouter).Methods("PUT", "DELETE")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
