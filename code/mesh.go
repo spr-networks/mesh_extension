@@ -1,5 +1,5 @@
 /**
- * Copyright (C) Longterm Security, Inc - All Rights Reserved
+ * Copyright (C) Supernetworks, Inc. - All Rights Reserved
  *
  * This source code is protected under international copyright law.  All rights
  * reserved and protected by the copyright holders.
