@@ -45,6 +45,7 @@ type DeviceEntry struct {
 var TEST_PREFIX = os.Getenv("TEST_PREFIX")
 var UNIX_PLUGIN_LISTENER = TEST_PREFIX + "/state/plugins/mesh/socket"
 var FirewallConfigFile = TEST_PREFIX + "/configs/mesh/rules.json"
+var BRIDGE_IFACE = "br0"
 
 var Configmtx sync.RWMutex
 
@@ -182,7 +183,23 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+
 	updateBridgeAccess("add", event.Iface, event.Mac)
+
+	//mark the interface isolated to prevent cross talk between devices
+	err := exec.Command("bridge", "link", "set", "dev", event.Iface, "isolated", "on").Run()
+	if err != nil {
+		fmt.Println("Failed to set", event.Iface, "to isoalted", err)
+		return
+	}
+
+	//set br0 as the bridge master
+	err := exec.Command("ip", "link", "set", "dev", event.Iface, "master", BRIDGE_IFACE).Run()
+	if err != nil {
+		fmt.Println("ip link set dev", event.Iface, "master br0 -- failed", err)
+		return
+	}
+
 }
 
 func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
@@ -196,6 +213,8 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updateBridgeAccess("remove", event.Iface, event.Mac)
+
+	//on disconnect it will automatically be removed from the bridge.
 }
 
 
