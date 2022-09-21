@@ -187,14 +187,14 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 	updateBridgeAccess("add", event.Iface, event.Mac)
 
 	//mark the interface isolated to prevent cross talk between devices
-	err := exec.Command("bridge", "link", "set", "dev", event.Iface, "isolated", "on").Run()
+	err = exec.Command("bridge", "link", "set", "dev", event.Iface, "isolated", "on").Run()
 	if err != nil {
 		fmt.Println("Failed to set", event.Iface, "to isoalted", err)
 		return
 	}
 
 	//set br0 as the bridge master
-	err := exec.Command("ip", "link", "set", "dev", event.Iface, "master", BRIDGE_IFACE).Run()
+	err = exec.Command("ip", "link", "set", "dev", event.Iface, "master", BRIDGE_IFACE).Run()
 	if err != nil {
 		fmt.Println("ip link set dev", event.Iface, "master br0 -- failed", err)
 		return
