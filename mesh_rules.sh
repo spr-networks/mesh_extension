@@ -106,6 +106,18 @@ table inet filter {
     counter jump DROPLOGINP
   }
 
+  chain FORWARD {
+    type filter hook forward priority 0; policy drop;
+
+    counter jump F_EST_RELATED
+
+    # allow docker containers to communicate upstream
+    $(if [ "$WANIF" ] && [ "$DOCKERIF" ]; then echo "iif $DOCKERIF oifname $WANIF ip saddr $DOCKERNET counter accept"; fi)
+    # allow docker containers to speak to LAN also
+    $(if [ "$LANIF" ] && [ "$DOCKERIF" ]; then echo "iif $DOCKERIF oifname $LANIF ip saddr $DOCKERNET counter accept"; fi)
+
+  }
+
   chain DROPLOGINP {
     counter log prefix "drop:input " group 1
     counter drop
