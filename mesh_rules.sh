@@ -44,14 +44,14 @@ table bridge filter {
     type ifname . ether_addr: verdict;
   }
 
-	chain FORWARD {
-		type filter hook forward priority 0; policy drop;
+  chain FORWARD {
+  type filter hook forward priority 0; policy drop;
     counter log prefix "bridge:in " group 0
 
     counter iifname . ether saddr vmap @bridge_access
 
-		counter log prefix \ " drop:bridge \" group 1
-	}
+    counter log prefix "drop:bridge " group 1
+  }
 }
 
 
