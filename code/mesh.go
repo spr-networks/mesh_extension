@@ -82,13 +82,12 @@ func loadConfigLocked() MeshConfig {
 }
 
 func saveConfigLocked(config MeshConfig) {
-  file, _ := json.MarshalIndent(config, "", " ")
-  err := ioutil.WriteFile(MeshConfigFile, file, 0600)
-  if err != nil {
-          fmt.Println(err)
-  }
+	file, _ := json.MarshalIndent(config, "", " ")
+	err := ioutil.WriteFile(MeshConfigFile, file, 0600)
+	if err != nil {
+		fmt.Println(err)
+	}
 }
-
 
 func getMeshConfig(w http.ResponseWriter, r *http.Request) {
 	Configmtx.Lock()
@@ -216,7 +215,6 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 
 	//on disconnect it will automatically be removed from the bridge.
 }
-
 
 func callAPIDeviceSync(IP string, Token string, devices map[string]DeviceEntry) {
 
