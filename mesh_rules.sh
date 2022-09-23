@@ -15,10 +15,24 @@ sysctl net.ipv4.conf.all.arp_filter=1
 
 # Create the bridge interface
 ip link add name br0 type bridge
+ip link set dev $WANIF down
+
+# Assign the bridge the WANIF MAC
+# Give WANIF the ephemeral bridge MAC,
+#  and the bridge the WANIF MAC
+# And allow the bridge to receive a MAC address
+WANMAC = $(ip -br link show dev ${WANIF} | awk '{print $3}')
+BRMAC = $(ip -br link show dev br0 | awk '{print $3}')
+ip link set dev $WANIF address ${BRMAC}
+ip link set dev br0 address ${WANMAC}
 ip link set dev br0 up
+ip link set dev $WANIF up
 
 # Add the upstream interface to the bridge
 ip link set dev $WANIF master br0
+
+# TBD should use our own dhcp client for htis
+dhclient br0
 
 # Clean previous rules
 iptables --flush

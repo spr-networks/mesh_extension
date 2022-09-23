@@ -199,6 +199,8 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TBD need to sync with upstream about this event.
+
 }
 
 func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
