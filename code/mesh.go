@@ -45,7 +45,6 @@ type DeviceEntry struct {
 
 var TEST_PREFIX = os.Getenv("TEST_PREFIX")
 var UNIX_PLUGIN_LISTENER = TEST_PREFIX + "/state/plugins/mesh/socket"
-var FirewallConfigFile = TEST_PREFIX + "/configs/mesh/rules.json"
 var BRIDGE_IFACE = "br0"
 
 var Configmtx sync.RWMutex
@@ -221,11 +220,11 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 
 func callAPIDeviceSync(IP string, Token string, devices map[string]DeviceEntry) {
 	jsonValue, _ := json.Marshal(devices)
-	req, err := http.NewRequest(http.MethodPut, "http://" + IP + "/devices", bytes.NewBuffer(jsonValue))
+	req, err := http.NewRequest(http.MethodPut, "http://"+IP+"/devices", bytes.NewBuffer(jsonValue))
 	if err != nil {
 		return
 	}
-	req.Header.Add("Authorization", "Bearer " + Token)
+	req.Header.Add("Authorization", "Bearer "+Token)
 
 	c := http.Client{}
 	resp, err := c.Do(req)
@@ -248,6 +247,7 @@ func syncDevices(w http.ResponseWriter, r *http.Request) {
 	devices := map[string]DeviceEntry{}
 	err := json.NewDecoder(r.Body).Decode(&devices)
 	if err != nil {
+		fmt.Println("[-] failed to decode devices")
 		http.Error(w, err.Error(), 400)
 		return
 	}
@@ -263,9 +263,6 @@ func syncDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func callAPISetSSID(IP string, Token string, SSID string) {
-
-
-
 
 }
 
@@ -338,10 +335,10 @@ func main() {
 	//good use case for event bus
 	unix_plugin_router.HandleFunc("/stationConnect", wifiConnect).Methods("PUT")
 	unix_plugin_router.HandleFunc("/stationDisconnect", wifiDisconnect).Methods("PUT")
-	unix_plugin_router.HandleFunc("/syncDevice", syncDevices).Methods("PUT")
+	unix_plugin_router.HandleFunc("/syncDevices", syncDevices).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setSSID", setSSID).Methods("PUT")
 
-	unix_plugin_router.HandleFunc("/leafRouters", leafRouters).Methods("GE")
+	unix_plugin_router.HandleFunc("/leafRouters", leafRouters).Methods("GET")
 	unix_plugin_router.HandleFunc("/leafRouter", leafRouter).Methods("PUT", "DELETE")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
