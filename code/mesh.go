@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -219,6 +220,27 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func callAPIDeviceSync(IP string, Token string, devices map[string]DeviceEntry) {
+	jsonValue, _ := json.Marshal(devices)
+	req, err := http.NewRequest(http.MethodPut, "http://" + IP + "/devices", bytes.NewBuffer(jsonValue))
+	if err != nil {
+		return
+	}
+	req.Header.Add("Authorization", "Bearer " + Token)
+
+	c := http.Client{}
+	resp, err := c.Do(req)
+	if err != nil {
+		fmt.Println("API device sync request failed", IP, err)
+		return
+	}
+
+	defer resp.Body.Close()
+	_, err = ioutil.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("API device sync request failed", resp.StatusCode)
+		return
+	}
 
 }
 
@@ -241,6 +263,9 @@ func syncDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func callAPISetSSID(IP string, Token string, SSID string) {
+
+
+
 
 }
 
