@@ -183,15 +183,6 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updateBridgeAccess("add", event.Iface, event.Mac)
-
-	//mark the interface isolated to prevent cross talk between devices
-	err = exec.Command("bridge", "link", "set", "dev", event.Iface, "isolated", "on").Run()
-	if err != nil {
-		fmt.Println("Failed to set", event.Iface, "to isoalted", err)
-		return
-	}
-
 	//set br0 as the bridge master
 	err = exec.Command("ip", "link", "set", "dev", event.Iface, "master", BRIDGE_IFACE).Run()
 	if err != nil {
@@ -199,8 +190,17 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TBD need to sync with upstream about this event.
+	//mark the interface isolated to prevent cross talk between devices
+	err = exec.Command("bridge", "link", "set", "dev", event.Iface, "isolated", "on").Run()
+	if err != nil {
+		fmt.Println("Failed to set", event.Iface, "to isolated", err)
+		return
+	}
 
+	updateBridgeAccess("add", event.Iface, event.Mac)
+
+	// TBD need to sync with upstream about this event.
+	// to handle pending devices joining.
 }
 
 func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
