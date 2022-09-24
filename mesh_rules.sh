@@ -24,8 +24,8 @@ ip link set dev $WANIF down
 WANMAC = $(ip -br link show dev ${WANIF} | awk '{print $3}')
 BRMAC = $(ip -br link show dev br0 | awk '{print $3}')
 ip link set dev $WANIF address ${BRMAC}
-ip link set dev br0 address ${WANMAC}
 ip link set dev br0 up
+ip link set dev br0 address ${WANMAC}
 ip link set dev $WANIF up
 
 # Add the upstream interface to the bridge
