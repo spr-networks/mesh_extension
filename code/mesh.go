@@ -211,7 +211,7 @@ func callParentAPI(Path string, jsonValue []byte) {
 	c := http.Client{}
 	resp, err := c.Do(req)
 	if err != nil {
-		fmt.Println("API Parent Event Push Failed", config.ParentIP, err)
+		fmt.Println("API Parent Event Push Failed", config.ParentIP, Path, err)
 		return
 	}
 
@@ -219,7 +219,7 @@ func callParentAPI(Path string, jsonValue []byte) {
 	_, err = ioutil.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		fmt.Println("API Parent Event Push Failed", resp.StatusCode)
+		fmt.Println("API Parent Event Push Failed", config.ParentIP, Path, resp.StatusCode)
 		return
 	}
 
@@ -229,17 +229,17 @@ func callParentAPI(Path string, jsonValue []byte) {
 
 func publishConnectEventParent(event WifiConnectEvent) {
 	jsonValue, _ := json.Marshal(event)
-	go callParentAPI("/reportPSKAuthSuccess", jsonValue)
+	go callParentAPI("reportPSKAuthSuccess", jsonValue)
 }
 
 func publishConnectFailureEventParent(event WifiConnectFailureEvent) {
 	jsonValue, _ := json.Marshal(event)
-	go callParentAPI("/reportPSKAuthFailure", jsonValue)
+	go callParentAPI("reportPSKAuthFailure", jsonValue)
 }
 
 func publishDisconnectEventParent(event WifiConnectEvent) {
 	jsonValue, _ := json.Marshal(event)
-	go callParentAPI("/reportDisconnect", jsonValue)
+	go callParentAPI("reportDisconnect", jsonValue)
 }
 
 
