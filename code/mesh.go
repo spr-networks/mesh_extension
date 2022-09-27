@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 )
 
@@ -55,10 +56,25 @@ type LeafRouter struct {
 }
 
 type MeshConfig struct {
-	LeafRouters []LeafRouter
+	ParentIP				string
+	ParentAPIToken	string
+	LeafRouters 		[]LeafRouter
 }
 
 var MeshConfigFile = TEST_PREFIX + "/configs/mesh/config.json"
+
+func LeafRouterID() string {
+	//return our assigned IP address as the Router ID
+	cmd := exec.Command("ip", "route", "get", "1.1.1.1")
+	stdout, err := cmd.Output()
+	if err == nil {
+		pieces := strings.Split(string(stdout), " ")
+		if len(pieces) >= 7 {
+			return pieces[6]
+		}
+	}
+	return ""
+}
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -166,18 +182,72 @@ func updateBridgeAccess(action string, iface string, mac string) {
 	}
 }
 
-type WifiConnectEvent struct {
-	Action string
-	Iface  string
-	Mac    string
-}
-
 func isLeafRouter() bool {
 	_, err := os.Stat("/state/plugins/mesh/enabled")
 	if err == nil {
 		return true
 	}
 	return false
+}
+
+
+func callParentAPI(Path string, jsonValue []byte) {
+	Configmtx.Lock()
+	defer Configmtx.Unlock()
+
+	config := loadConfigLocked()
+
+	if config.ParentAPIToken == "" {
+		fmt.Println("[-] Mesh leaf not configured with parent API token, aborting call to", Path)
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPut, "http://" + config.ParentIP +"/" + Path, bytes.NewBuffer(jsonValue))
+	if err != nil {
+		return
+	}
+	req.Header.Add("Authorization", "Bearer " + config.ParentAPIToken)
+
+	c := http.Client{}
+	resp, err := c.Do(req)
+	if err != nil {
+		fmt.Println("API Parent Event Push Failed", config.ParentIP, err)
+		return
+	}
+
+	defer resp.Body.Close()
+	_, err = ioutil.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("API Parent Event Push Failed", resp.StatusCode)
+		return
+	}
+
+}
+
+//func callParentAPI(Path string, jsonValue []bytes) {
+
+func publishConnectEventParent(event WifiConnectEvent) {
+	jsonValue, _ := json.Marshal(event)
+	go callParentAPI("/reportPSKAuthSuccess", jsonValue)
+}
+
+func publishConnectFailureEventParent(event WifiConnectFailureEvent) {
+	jsonValue, _ := json.Marshal(event)
+	go callParentAPI("/reportPSKAuthFailure", jsonValue)
+}
+
+func publishDisconnectEventParent(event WifiConnectEvent) {
+	jsonValue, _ := json.Marshal(event)
+	go callParentAPI("/reportDisconnect", jsonValue)
+}
+
+
+type WifiConnectEvent struct {
+	Action  string
+	Iface   string
+	Mac     string
+	Router	string
 }
 
 func wifiConnect(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +264,10 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 	if !isLeafRouter() {
 		return
 	}
+
+	event.Router = LeafRouterID()
+
+	publishConnectEventParent(event)
 
 	//set br0 as the bridge master
 	err = exec.Command("ip", "link", "set", "dev", event.Iface, "master", BRIDGE_IFACE).Run()
@@ -215,6 +289,35 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 	// to handle pending devices joining.
 }
 
+type WifiConnectFailureEvent struct {
+	Type   string
+	MAC    string
+	Reason string
+	Status string
+	Router string
+}
+
+func wifiConnectFailure(w http.ResponseWriter, r *http.Request) {
+	//A device connected. Add the interface to the bridge,
+	// and then add it to the bridge_access nft
+
+	event := WifiConnectFailureEvent{}
+	err := json.NewDecoder(r.Body).Decode(&event)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	if !isLeafRouter() {
+		return
+	}
+
+	event.Router = LeafRouterID()
+
+	publishConnectFailureEventParent(event)
+}
+
+
 func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 	//A device disconnected, update bridge_access. Add the interface to the bridge,
 	// and then add it to the bridge_access nft
@@ -229,6 +332,10 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 	if !isLeafRouter() {
 		return
 	}
+
+	event.Router = LeafRouterID()
+
+	publishDisconnectEventParent(event)
 
 	updateBridgeAccess("remove", event.Iface, event.Mac)
 
@@ -351,6 +458,7 @@ func main() {
 
 	//good use case for event bus
 	unix_plugin_router.HandleFunc("/stationConnect", wifiConnect).Methods("PUT")
+	unix_plugin_router.HandleFunc("/stationConnectFailure", wifiConnectFailure).Methods("PUT")
 	unix_plugin_router.HandleFunc("/stationDisconnect", wifiDisconnect).Methods("PUT")
 	unix_plugin_router.HandleFunc("/syncDevices", syncDevices).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setSSID", setSSID).Methods("PUT")
