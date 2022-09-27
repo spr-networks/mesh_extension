@@ -30,7 +30,7 @@ ip link set dev $WANIF up
 
 # Add the upstream interface to the bridge
 ip link set dev $WANIF master br0
-
+dhclient -r $WANIF
 ip address flush dev $WANIF
 # TBD should use our own dhcp client
 dhclient br0
@@ -47,6 +47,8 @@ iptables-legacy --delete-chain
 iptables-legacy -t nat --delete-chain
 
 nft flush ruleset
+
+WANIF=br0
 
 nft -f - << EOF
 
