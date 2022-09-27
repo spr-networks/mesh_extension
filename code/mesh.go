@@ -172,6 +172,14 @@ type WifiConnectEvent struct {
 	Mac    string
 }
 
+func isLeafRouter() bool {
+	_, err := os.Stat("/state/plugins/mesh/enabled")
+	if err == nil {
+		return true
+	}
+	return false
+}
+
 func wifiConnect(w http.ResponseWriter, r *http.Request) {
 	//A device connected. Add the interface to the bridge,
 	// and then add it to the bridge_access nft
@@ -180,6 +188,10 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&event)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	if !isLeafRouter() {
 		return
 	}
 
@@ -213,6 +225,11 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+
+	if !isLeafRouter() {
+		return
+	}
+
 	updateBridgeAccess("remove", event.Iface, event.Mac)
 
 	//on disconnect it will automatically be removed from the bridge.
