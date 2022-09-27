@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# Disable IP forwarding. Not needed with bridge.
-
-sysctl net.ipv4.ip_forward=0
-
 # Drop input
 iptables -P INPUT DROP
 
