@@ -21,8 +21,8 @@ ip link set dev $WANIF down
 # Give WANIF the ephemeral bridge MAC,
 #  and the bridge the WANIF MAC
 # And allow the bridge to receive a MAC address
-WANMAC = $(ip -br link show dev ${WANIF} | awk '{print $3}')
-BRMAC = $(ip -br link show dev br0 | awk '{print $3}')
+WANMAC=$(ip -br link show dev ${WANIF} | awk '{print $3}')
+BRMAC=$(ip -br link show dev br0 | awk '{print $3}')
 ip link set dev $WANIF address ${BRMAC}
 ip link set dev br0 up
 ip link set dev br0 address ${WANMAC}
@@ -31,7 +31,8 @@ ip link set dev $WANIF up
 # Add the upstream interface to the bridge
 ip link set dev $WANIF master br0
 
-# TBD should use our own dhcp client for htis
+ip address flush dev $WANIF
+# TBD should use our own dhcp client
 dhclient br0
 
 # Clean previous rules
@@ -63,6 +64,7 @@ table bridge filter {
     counter log prefix "bridge:in " group 0
 
     counter iifname . ether saddr vmap @bridge_access
+    counter oifname . ether daddr vmap @bridge_access
 
     counter log prefix "drop:bridge " group 1
   }
