@@ -244,7 +244,7 @@ func publishDisconnectEventParent(event WifiConnectEvent) {
 
 
 type WifiConnectEvent struct {
-	Action  string
+	Event   string
 	Iface   string
 	Mac     string
 	Router	string
