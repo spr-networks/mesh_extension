@@ -56,9 +56,9 @@ type LeafRouter struct {
 }
 
 type MeshConfig struct {
-	ParentIP				string
-	ParentAPIToken	string
-	LeafRouters 		[]LeafRouter
+	ParentIP       string
+	ParentAPIToken string
+	LeafRouters    []LeafRouter
 }
 
 var MeshConfigFile = TEST_PREFIX + "/configs/mesh/config.json"
@@ -190,7 +190,6 @@ func isLeafRouter() bool {
 	return false
 }
 
-
 func callParentAPI(Path string, jsonValue []byte) {
 	Configmtx.Lock()
 	defer Configmtx.Unlock()
@@ -202,11 +201,11 @@ func callParentAPI(Path string, jsonValue []byte) {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodPut, "http://" + config.ParentIP +"/" + Path, bytes.NewBuffer(jsonValue))
+	req, err := http.NewRequest(http.MethodPut, "http://"+config.ParentIP+"/"+Path, bytes.NewBuffer(jsonValue))
 	if err != nil {
 		return
 	}
-	req.Header.Add("Authorization", "Bearer " + config.ParentAPIToken)
+	req.Header.Add("Authorization", "Bearer "+config.ParentAPIToken)
 
 	c := http.Client{}
 	resp, err := c.Do(req)
@@ -242,12 +241,11 @@ func publishDisconnectEventParent(event WifiConnectEvent) {
 	go callParentAPI("reportDisconnect", jsonValue)
 }
 
-
 type WifiConnectEvent struct {
-	Event   string
-	Iface   string
-	Mac     string
-	Router	string
+	Event  string
+	Iface  string
+	Mac    string
+	Router string
 }
 
 func wifiConnect(w http.ResponseWriter, r *http.Request) {
@@ -317,7 +315,6 @@ func wifiConnectFailure(w http.ResponseWriter, r *http.Request) {
 	publishConnectFailureEventParent(event)
 }
 
-
 func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 	//A device disconnected, update bridge_access. Add the interface to the bridge,
 	// and then add it to the bridge_access nft
@@ -386,10 +383,63 @@ func syncDevices(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func callAPISetSSID(IP string, Token string, SSID string) {
+func callAPISetSSID(IP string, Token string, SSID string, iface string) {
+	val := map[string]string{}
+	val["Ssid"] = SSID
+	jsonValue, _ := json.Marshal(val)
+	req, err := http.NewRequest(http.MethodPut, "http://"+IP+"/hostapd/"+iface+"/config", bytes.NewBuffer(jsonValue))
+	if err != nil {
+		return
+	}
+	req.Header.Add("Authorization", "Bearer "+Token)
+
+	c := http.Client{}
+	resp, err := c.Do(req)
+	if err != nil {
+		fmt.Println("API Set SSID Failed", IP, iface, err)
+		return
+	}
+
+	defer resp.Body.Close()
+	_, err = ioutil.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("API Set SSID Failed", IP, iface, resp.StatusCode)
+		return
+	}
 
 }
 
+type InterfaceConfig struct {
+	Name    string
+	Type    string
+	Enabled bool
+}
+
+func callAPIGetInterfaces(IP string, Token string) []InterfaceConfig {
+	ifaces := []InterfaceConfig{}
+	req, err := http.NewRequest(http.MethodPut, "http://"+IP+"/interfacesConfiguration", nil)
+	if err != nil {
+		return ifaces
+	}
+	req.Header.Add("Authorization", "Bearer "+Token)
+
+	c := http.Client{}
+	resp, err := c.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		fmt.Println("API Get Interfaces failed", IP, err)
+		return ifaces
+	}
+
+	err = json.NewDecoder(resp.Body).Decode(&ifaces)
+	if err != nil {
+		fmt.Println("[-] Could not deserialize interfaces")
+		return ifaces
+	}
+
+	return ifaces
+
+}
 func setSSID(w http.ResponseWriter, r *http.Request) {
 	SSID := ""
 	err := json.NewDecoder(r.Body).Decode(&SSID)
@@ -403,7 +453,12 @@ func setSSID(w http.ResponseWriter, r *http.Request) {
 	//for each subscribed leaf node, set the ssid
 	config := loadConfigLocked()
 	for _, entry := range config.LeafRouters {
-		callAPISetSSID(entry.IP, entry.APIToken, SSID)
+		ifaces := callAPIGetInterfaces(entry.IP, entry.APIToken)
+		for _, iface := range ifaces {
+			if iface.Enabled && iface.Type == "AP" {
+				callAPISetSSID(entry.IP, entry.APIToken, SSID, iface.Name)
+			}
+		}
 	}
 
 }
