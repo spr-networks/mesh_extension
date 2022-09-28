@@ -182,8 +182,18 @@ func updateBridgeAccess(action string, iface string, mac string) {
 	}
 }
 
+var MESH_ENABLED_LEAF_PATH = TEST_PREFIX + "/state/plugins/mesh/enabled"
+
+func setLeafRouter(enabled bool) {
+	if enabled == false {
+		os.Remove(MESH_ENABLED_LEAF_PATH)
+	} else {
+		os.Create(MESH_ENABLED_LEAF_PATH)
+	}
+}
+
 func isLeafRouter() bool {
-	_, err := os.Stat("/state/plugins/mesh/enabled")
+	_, err := os.Stat(MESH_ENABLED_LEAF_PATH)
 	if err == nil {
 		return true
 	}
@@ -506,10 +516,32 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func leafMode(w http.ResponseWriter, r *http.Request) {
+	Configmtx.Lock()
+	defer Configmtx.Unlock()
+
+	if r.Method == http.MethodPut {
+		action := mux.Vars(r)["enable"]
+		if action == "enable" {
+			setLeafRouter(true)
+		} else if action == "disable" {
+			setLeafRouter(false)
+		} else {
+			http.Error(w, fmt.Errorf("invalid enable param").Error(), 400)
+			return
+		}
+	} else {
+		val := isLeafRouter()
+		json.NewEncoder(w).Encode(val)
+	}
+
+}
 func main() {
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
 	unix_plugin_router.HandleFunc("/config", getMeshConfig).Methods("GET")
+	unix_plugin_router.HandleFunc("/leafMode/{enable}", leafMode).Methods("PUT")
+	unix_plugin_router.HandleFunc("/leafMode", leafMode).Methods("GET")
 
 	//good use case for event bus
 	unix_plugin_router.HandleFunc("/stationConnect", wifiConnect).Methods("PUT")
