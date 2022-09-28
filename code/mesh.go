@@ -492,7 +492,7 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 
 	entry := LeafRouter{}
 	err := json.NewDecoder(r.Body).Decode(&entry)
-	if err == nil {
+	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
@@ -588,8 +588,6 @@ func main() {
 	unix_plugin_router.HandleFunc("/leafMode/{enable}", leafMode).Methods("PUT")
 	unix_plugin_router.HandleFunc("/leafMode", leafMode).Methods("GET")
 
-	unix_plugin_router.HandleFunc("/setParentCredentials", setParentCredentials).Methods("PUT", "DELETE")
-
 	//adding a leaf router to a central router
 	unix_plugin_router.HandleFunc("/leafRouters", leafRouters).Methods("GET")
 	unix_plugin_router.HandleFunc("/leafRouter", leafRouter).Methods("PUT", "DELETE")
@@ -603,6 +601,7 @@ func main() {
 	//these are routines for synchronizing from a central router to a leaf router
 	unix_plugin_router.HandleFunc("/syncDevices", syncDevices).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setSSID", setSSID).Methods("PUT")
+	unix_plugin_router.HandleFunc("/setParentCredentials", setParentCredentials).Methods("PUT", "DELETE")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
