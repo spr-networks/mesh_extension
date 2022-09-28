@@ -55,10 +55,14 @@ type LeafRouter struct {
 	IP       string
 }
 
-type MeshConfig struct {
+type ParentCredentials struct {
 	ParentIP       string
 	ParentAPIToken string
-	LeafRouters    []LeafRouter
+}
+
+type MeshConfig struct {
+	ParentCredentials
+	LeafRouters []LeafRouter
 }
 
 var MeshConfigFile = TEST_PREFIX + "/configs/mesh/config.json"
@@ -516,6 +520,44 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func setParentCredentials(w http.ResponseWriter, r *http.Request) {
+	Configmtx.Lock()
+	defer Configmtx.Unlock()
+	config := loadConfigLocked()
+
+	if r.Method == http.MethodDelete {
+		config.ParentIP = ""
+		config.ParentAPIToken = ""
+		saveConfigLocked(config)
+		return
+	}
+
+	creds := ParentCredentials{}
+	err := json.NewDecoder(r.Body).Decode(&creds)
+	if err == nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	if creds.ParentAPIToken == "" {
+		fmt.Println("[-] Invalid API Token")
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	ip := net.ParseIP(creds.ParentIP)
+	if ip == nil {
+		http.Error(w, fmt.Errorf("invalid ip "+creds.ParentIP).Error(), 400)
+		return
+	}
+
+	//parent credentials are used to inform the parent about events
+	config.ParentIP = creds.ParentIP
+	config.ParentAPIToken = creds.ParentAPIToken
+
+	saveConfigLocked(config)
+}
+
 func leafMode(w http.ResponseWriter, r *http.Request) {
 	Configmtx.Lock()
 	defer Configmtx.Unlock()
@@ -539,19 +581,28 @@ func leafMode(w http.ResponseWriter, r *http.Request) {
 func main() {
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
+	//view mesh configuration
 	unix_plugin_router.HandleFunc("/config", getMeshConfig).Methods("GET")
+
+	//get and set leaf mode
 	unix_plugin_router.HandleFunc("/leafMode/{enable}", leafMode).Methods("PUT")
 	unix_plugin_router.HandleFunc("/leafMode", leafMode).Methods("GET")
 
+	unix_plugin_router.HandleFunc("/setParentCredentials", setParentCredentials).Methods("PUT", "DELETE")
+
+	//adding a leaf router to a central router
+	unix_plugin_router.HandleFunc("/leafRouters", leafRouters).Methods("GET")
+	unix_plugin_router.HandleFunc("/leafRouter", leafRouter).Methods("PUT", "DELETE")
+
 	//good use case for event bus
+	// these are called by the API on-device into the mesh plugin
 	unix_plugin_router.HandleFunc("/stationConnect", wifiConnect).Methods("PUT")
 	unix_plugin_router.HandleFunc("/stationConnectFailure", wifiConnectFailure).Methods("PUT")
 	unix_plugin_router.HandleFunc("/stationDisconnect", wifiDisconnect).Methods("PUT")
+
+	//these are routines for synchronizing from a central router to a leaf router
 	unix_plugin_router.HandleFunc("/syncDevices", syncDevices).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setSSID", setSSID).Methods("PUT")
-
-	unix_plugin_router.HandleFunc("/leafRouters", leafRouters).Methods("GET")
-	unix_plugin_router.HandleFunc("/leafRouter", leafRouter).Methods("PUT", "DELETE")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
