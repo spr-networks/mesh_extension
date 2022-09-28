@@ -534,7 +534,7 @@ func setParentCredentials(w http.ResponseWriter, r *http.Request) {
 
 	creds := ParentCredentials{}
 	err := json.NewDecoder(r.Body).Decode(&creds)
-	if err == nil {
+	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
