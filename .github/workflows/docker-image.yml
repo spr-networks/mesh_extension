@@ -25,10 +25,6 @@ jobs:
         name: Authenticate to ghcr
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       -
-        name: Build containers
+        name: Build and push multiplatform containers
         run: |
           ./build_docker_compose.sh --set "*.platform=linux/amd64,linux/arm64" `[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"`
-      -
-        name: Push images
-        run: |
-          docker-compose push
