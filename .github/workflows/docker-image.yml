@@ -25,11 +25,31 @@ jobs:
         name: Authenticate to ghcr
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       -
-        name: Build arm64 containers
+        name: Build and push multiplatform containers
         run: |
-          export DOCKER_DEFAULT_PLATFORM=linux/arm64          
-          ./build_docker_compose.sh
-      -
-        name: Push images
+          ./build_docker_compose.sh --set "*.platform=linux/amd64,linux/arm64" `[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"`
+      - name: Get images from docker-compose.yml
+        id: get-images
+        uses: mikefarah/yq@master
+        with:
+          cmd: yq -o json -I 0 '[.services|.[]|.image]' docker-compose.yml
+
+      - name: Set Matrix output
+        id: set-matrix
         run: |
-          docker-compose push
+          echo '::set-output name=matrix::${{ steps.get-images.outputs.result }}'
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+
+  sbom:
+    name: Generate SBOMs
+    needs: buildx
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: ${{ fromJson(needs.build-images.outputs.matrix) }}
+    steps:
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: '${{ matrix.image }}'
