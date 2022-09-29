@@ -566,8 +566,12 @@ func leafMode(w http.ResponseWriter, r *http.Request) {
 		action := mux.Vars(r)["enable"]
 		if action == "enable" {
 			setLeafRouter(true)
+			// whoever called enable is responsible for telling
+			// superd to restart super
 		} else if action == "disable" {
 			setLeafRouter(false)
+			//delete the bridge upon disable
+			exec.Command("ip", "link", "del", "br0").Output()
 		} else {
 			http.Error(w, fmt.Errorf("invalid enable param").Error(), 400)
 			return
