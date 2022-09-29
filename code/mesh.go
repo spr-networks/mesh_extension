@@ -433,7 +433,7 @@ type InterfaceConfig struct {
 
 func callAPIGetInterfaces(IP string, Token string) []InterfaceConfig {
 	ifaces := []InterfaceConfig{}
-	req, err := http.NewRequest(http.MethodPut, "http://"+IP+"/interfacesConfiguration", nil)
+	req, err := http.NewRequest(http.MethodGet, "http://"+IP+"/interfacesConfiguration", nil)
 	if err != nil {
 		return ifaces
 	}
