@@ -571,13 +571,6 @@ func leafMode(w http.ResponseWriter, r *http.Request) {
 			// superd to restart super
 		} else if action == "disable" {
 			setLeafRouter(false)
-
-			//delete the bridge upon disable -- after a 10 second delay
-			go func() {
-				time.Sleep(10 * time.Second)
-				exec.Command("ip", "link", "del", "br0").Output()
-			}()
-
 		} else {
 			http.Error(w, fmt.Errorf("invalid enable param").Error(), 400)
 			return
