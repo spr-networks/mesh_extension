@@ -22,7 +22,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"time"
 )
 
 import (
