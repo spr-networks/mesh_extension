@@ -391,7 +391,7 @@ func flushRoute(MAC string) {
 				fmt.Println("ip addr del failed", routeIP, dev, "@", line)
 			}
 			//clear the arp entry too
-			err = exec.Command("arp", "-i", dev, "del", ip).Run()
+			err = exec.Command("arp", "-i", dev, "-d", ip).Run()
 			if err != nil {
 				fmt.Println("failed to clear arp entry on ", dev, "for", ip)
 			}
