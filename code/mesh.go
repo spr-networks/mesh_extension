@@ -362,9 +362,9 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 	//on disconnect it will automatically be removed from the bridge.
 }
 
-func tinyRoute(ip string) string {
+func tinyRoute(ip string, delta uint32) string {
 	net_ip := net.ParseIP(ip)
-	u := binary.BigEndian.Uint32(net_ip.To4()) - 2
+	u := binary.BigEndian.Uint32(net_ip.To4()) - delta
 	newIP := net.IPv4(byte(u>>24), byte(u>>16), byte(u>>8), byte(u))
 	routeIP := newIP.String() + "/30"
 	return routeIP
@@ -384,10 +384,16 @@ func flushRoute(MAC string) {
 			fields := strings.Fields(line)
 			ip := fields[0]
 			dev := fields[5]
-			routeIP := tinyRoute(ip)
-			err := exec.Command("ip", "addr", "del", routeIP, "dev", dev).Run()
+			routeIP := tinyRoute(ip, 1)
+			//delete the `router`
+			err = exec.Command("ip", "addr", "del", routeIP, "dev", dev).Run()
 			if err != nil {
 				fmt.Println("ip addr del failed", routeIP, dev, "@", line)
+			}
+			//clear the arp entry too
+			err = exec.Command("arp", "-i", dev, "del", ip).Run()
+			if err != nil {
+				fmt.Println("failed to clear arp entry on ", dev, "for", ip)
 			}
 			return
 		}
