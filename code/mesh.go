@@ -12,6 +12,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -20,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -341,6 +343,13 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !isLeafRouter() {
+		//update the routing table by deleting the entry for this peer
+		if event.Mac != "" {
+			validMAC := regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`).MatchString
+			if validMAC(event.Mac) {
+				flushRoute(event.Mac)
+			}
+		}
 		return
 	}
 
@@ -351,6 +360,39 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 	updateBridgeAccess("remove", event.Iface, event.Mac)
 
 	//on disconnect it will automatically be removed from the bridge.
+}
+
+func tinyRoute(ip string) string {
+	net_ip := net.ParseIP(ip)
+	u := binary.BigEndian.Uint32(net_ip.To4()) - 2
+	newIP := net.IPv4(byte(u>>24), byte(u>>16), byte(u>>8), byte(u))
+	routeIP := newIP.String() + "/30"
+	return routeIP
+}
+
+func flushRoute(MAC string) {
+	data, err := ioutil.ReadFile("/proc/net/arp")
+	if err != nil {
+		fmt.Println("failed to read arp file", err)
+		return
+	}
+
+	pieces := strings.Split(string(data), "\n")
+	for _, line := range pieces {
+		if strings.Contains(line, MAC) {
+			//found the ARP entry
+			fields := strings.Fields(line)
+			ip := fields[0]
+			dev := fields[5]
+			routeIP := tinyRoute(ip)
+			err := exec.Command("ip", "addr", "del", routeIP, "dev", dev).Run()
+			if err != nil {
+				fmt.Println("ip addr del failed", routeIP, dev, "@", line)
+			}
+			return
+		}
+	}
+
 }
 
 func callAPIDeviceSync(IP string, Token string, devices map[string]DeviceEntry) {
