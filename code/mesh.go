@@ -347,7 +347,19 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 		if event.Mac != "" {
 			validMAC := regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`).MatchString
 			if validMAC(event.Mac) {
-				flushRoute(event.Mac)
+				//query all the leaf routers to see if the station is still there
+				stations := getGlobalStations()
+				search := strings.ToLower(event.Mac)
+				found := false
+				for _, val := range stations {
+					if strings.ToLower(val) == search {
+						found = true
+						break
+					}
+				}
+				if !found {
+					flushRoute(event.Mac)
+				}
 			}
 		}
 		return
@@ -502,6 +514,53 @@ func callAPIGetInterfaces(IP string, Token string) []InterfaceConfig {
 	return ifaces
 
 }
+
+func callAPIGetStations(IP string, Token string, Iface string) []string {
+	stations := []string{}
+	var data map[string]interface{}
+	req, err := http.NewRequest(http.MethodGet, "http://"+IP+"/"+Iface+"/all_stations", nil)
+	if err != nil {
+		return stations
+	}
+	req.Header.Add("Authorization", "Bearer "+Token)
+
+	c := http.Client{}
+	resp, err := c.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		fmt.Println("API Get Stations failed", IP, err)
+		return stations
+	}
+
+	err = json.NewDecoder(resp.Body).Decode(&data)
+	if err != nil {
+		fmt.Println("[-] Could not deserialize stations")
+		return stations
+	}
+
+	for k := range data {
+		stations = append(stations, k)
+	}
+
+	return stations
+}
+
+func getGlobalStations() []string {
+	stations := []string{}
+	Configmtx.Lock()
+	defer Configmtx.Unlock()
+	//for each subscribed leaf node, set the ssid
+	config := loadConfigLocked()
+	for _, entry := range config.LeafRouters {
+		ifaces := callAPIGetInterfaces(entry.IP, entry.APIToken)
+		for _, iface := range ifaces {
+			if iface.Enabled && iface.Type == "AP" {
+				stations = append(stations, callAPIGetStations(entry.IP, entry.APIToken, iface.Name)...)
+			}
+		}
+	}
+	return stations
+}
+
 func setSSID(w http.ResponseWriter, r *http.Request) {
 	SSID := ""
 	err := json.NewDecoder(r.Body).Decode(&SSID)
