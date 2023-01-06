@@ -342,29 +342,6 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !isLeafRouter() {
-		//update the routing table by deleting the entry for this peer
-		if event.Mac != "" {
-			validMAC := regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`).MatchString
-			if validMAC(event.Mac) {
-				//query all the leaf routers to see if the station is still there
-				stations := getGlobalStations()
-				search := strings.ToLower(event.Mac)
-				found := false
-				for _, val := range stations {
-					if strings.ToLower(val) == search {
-						found = true
-						break
-					}
-				}
-				if !found {
-					flushRoute(event.Mac)
-				}
-			}
-		}
-		return
-	}
-
 	event.Router = LeafRouterID()
 
 	publishDisconnectEventParent(event)
@@ -380,37 +357,6 @@ func tinyRoute(ip string, delta uint32) string {
 	newIP := net.IPv4(byte(u>>24), byte(u>>16), byte(u>>8), byte(u))
 	routeIP := newIP.String() + "/30"
 	return routeIP
-}
-
-func flushRoute(MAC string) {
-	data, err := ioutil.ReadFile("/proc/net/arp")
-	if err != nil {
-		fmt.Println("failed to read arp file", err)
-		return
-	}
-
-	pieces := strings.Split(string(data), "\n")
-	for _, line := range pieces {
-		if strings.Contains(line, MAC) {
-			//found the ARP entry
-			fields := strings.Fields(line)
-			ip := fields[0]
-			dev := fields[5]
-			routeIP := tinyRoute(ip, 1)
-			//delete the `router`
-			err = exec.Command("ip", "addr", "del", routeIP, "dev", dev).Run()
-			if err != nil {
-				fmt.Println("ip addr del failed", routeIP, dev, "@", line)
-			}
-			//clear the arp entry too
-			err = exec.Command("arp", "-i", dev, "-d", ip).Run()
-			if err != nil {
-				fmt.Println("failed to clear arp entry on ", dev, "for", ip)
-			}
-			return
-		}
-	}
-
 }
 
 func callAPIDeviceSync(IP string, Token string, devices map[string]DeviceEntry) {
