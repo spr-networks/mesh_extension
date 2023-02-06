@@ -38,12 +38,12 @@ jobs:
         name: Authenticate to ghcr
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       -
-        name: Build and push multiplatform containers
+        name: Build and push containers
         run: |
           ./build_docker_compose.sh \
-		--set "*.platform=linux/amd64,linux/arm64" \
-		`[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"` \
-		--tag "${RELEASE_VERSION:-latest}"
+            --set "*.platform=linux/amd64,linux/arm64" \
+            `[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"` \
+            --tag "${RELEASE_VERSION:-latest}"
       - name: Get images from docker-compose.yml
         id: get-images
         uses: mikefarah/yq@master
