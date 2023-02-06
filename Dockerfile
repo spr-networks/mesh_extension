@@ -10,10 +10,7 @@ RUN rm -rf /usr/local/go && tar -C /usr/local -xzf go1.19.linux-${TARGETARCH}.ta
 ENV PATH="/usr/local/go/bin:$PATH"
 COPY code/ /code/
 
-ARG USE_TMPFS=true
-RUN --mount=type=tmpfs,target=/tmpfs \
-    [ "$USE_TMPFS" = "true" ] && ln -s /tmpfs /root/go; \
-    go build -ldflags "-s -w" -o /mesh /code/mesh.go
+RUN --mount=type=tmpfs,target=/root/go/ (go build -ldflags "-s -w" -o /mesh /code/mesh.go)
 
 
 FROM ubuntu:22.04
