@@ -41,8 +41,8 @@ jobs:
         run: |
           ./build_docker_compose.sh \
             --set "*.platform=linux/amd64,linux/arm64" \
-            --set "*.tags=mesh_extension_mesh:${RELEASE_VERSION:-latest}" \
-            `[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"`
+            `[[ "${{ github.event_name }}" =~ ^(push|workflow_run)$  ]] && [ "${{ github.ref_name }}" = "main" ] && echo "--push"`
+#            --set "*.tags=mesh_extension_mesh:${RELEASE_VERSION:-latest}" \
       - name: Get images from docker-compose.yml
         id: get-images
         uses: mikefarah/yq@master
