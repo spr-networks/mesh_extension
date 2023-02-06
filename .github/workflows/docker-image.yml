@@ -5,6 +5,11 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+#  workflow_run:
+#    workflows: ["Bump version"]
+#    types:
+#      - completed
+#    branches: [ main ]
 
 jobs:
 
@@ -14,6 +19,14 @@ jobs:
       -
         name: Checkout
         uses: actions/checkout@v2
+        with:
+          fetch-depth: '0'
+      -
+        name: Get version from git
+        run: echo "RELEASE_VERSION=$(git describe --tags --abbrev=0 | grep -Eo '[0-9]+\.[0-9]+.[0-9]+')" >> $GITHUB_ENV
+      -
+        name: Test release tag version
+        run: echo "RELEASE_VERSION == $RELEASE_VERSION"
       -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v1
@@ -27,7 +40,10 @@ jobs:
       -
         name: Build and push multiplatform containers
         run: |
-          ./build_docker_compose.sh --set "*.platform=linux/amd64,linux/arm64" `[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"`
+          ./build_docker_compose.sh \
+		--set "*.platform=linux/amd64,linux/arm64" \
+		`[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"` \
+		--tag "${RELEASE_VERSION:-latest}"
       - name: Get images from docker-compose.yml
         id: get-images
         uses: mikefarah/yq@master
@@ -41,15 +57,15 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
 
-  sbom:
-    name: Generate SBOMs
-    needs: buildx
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        image: ${{ fromJson(needs.build-images.outputs.matrix) }}
-    steps:
-      - name: Generate SBOM
-        uses: anchore/sbom-action@v0
-        with:
-          image: '${{ matrix.image }}'
+#  sbom:
+#    name: Generate SBOMs
+#    needs: buildx
+#    runs-on: ubuntu-latest
+#    strategy:
+#      matrix:
+#        image: ${{ fromJson(needs.build-images.outputs.matrix) }}
+#    steps:
+#      - name: Generate SBOM
+#        uses: anchore/sbom-action@v0
+#        with:
+#          image: '${{ matrix.image }}'
