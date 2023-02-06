@@ -42,8 +42,8 @@ jobs:
         run: |
           ./build_docker_compose.sh \
             --set "*.platform=linux/amd64,linux/arm64" \
+            --set "tags=${RELEASE_VERSION:-latest}" \
             `[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"` \
-            --tag "${RELEASE_VERSION:-latest}"
       - name: Get images from docker-compose.yml
         id: get-images
         uses: mikefarah/yq@master
