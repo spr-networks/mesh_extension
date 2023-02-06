@@ -45,7 +45,7 @@ jobs:
         run: |
           ./build_docker_compose.sh \
             --set "*.platform=linux/amd64,linux/arm64" \
-            --set "*.tags=mesh_extension_mesh:${RELEASE_VERSION:-latest}" \
+            --set "*.tags=ghcr.io/spr-networks/mesh_extension_mesh:${RELEASE_VERSION:-latest}" \
             `[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"` \
       - name: Get images from docker-compose.yml
         id: get-images
