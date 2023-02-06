@@ -38,14 +38,14 @@ jobs:
         name: Authenticate to ghcr
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       -
-        name: test command
-        run: echo "running:" "*.platform=linux/amd64,linux/arm64" "tags=${RELEASE_VERSION:-latest}"
+        name: build options
+        run: echo "tags:" "*.platform=linux/amd64,linux/arm64" "tags=${RELEASE_VERSION:-latest}"
       -
         name: Build and push containers
         run: |
           ./build_docker_compose.sh \
             --set "*.platform=linux/amd64,linux/arm64" \
-            --set "tags=${RELEASE_VERSION:-latest}" \
+            --set "tags=mesh_extension_mesh:${RELEASE_VERSION:-latest}" \
             `[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"` \
       - name: Get images from docker-compose.yml
         id: get-images
