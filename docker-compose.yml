@@ -7,12 +7,19 @@ x-logging:
 x-labels:
   &default-labels
   org.supernetworks.ci: ${CI:-false}
+  org.supernetworks.version: ${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
 
 services:
   mesh:
     container_name: supermesh
     image: ghcr.io/spr-networks/mesh_extension_mesh:${RELEASE_VERSION:-latest}
-    build: .
+    build:
+      context: .
+      labels: *default-labels
+      x-bake:
+        tags:
+        - ghcr.io/spr-networks/super_base:latest${RELEASE_CHANNEL:-}
+        - ghcr.io/spr-networks/super_base:${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
     network_mode: host
     privileged: true
     logging: *default-logging
