@@ -23,7 +23,6 @@ services:
     network_mode: host
     privileged: true
     logging: *default-logging
-    labels: *default-labels
     volumes:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
