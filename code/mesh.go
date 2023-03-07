@@ -223,6 +223,7 @@ func callParentAPI(Path string, jsonValue []byte) {
 	req.Header.Add("Authorization", "Bearer "+config.ParentAPIToken)
 
 	c := http.Client{}
+	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
 	if err != nil {
 		fmt.Println("API Parent Event Push Failed", config.ParentIP, Path, err)
@@ -367,6 +368,7 @@ func callAPIDeviceSync(IP string, Token string, devices map[string]DeviceEntry) 
 	req.Header.Add("Authorization", "Bearer "+Token)
 
 	c := http.Client{}
+	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
 	if err != nil {
 		fmt.Println("API device sync request failed", IP, err)
@@ -413,6 +415,7 @@ func callAPISetSSID(IP string, Token string, SSID string, iface string) {
 	req.Header.Add("Authorization", "Bearer "+Token)
 
 	c := http.Client{}
+	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
 	if err != nil {
 		fmt.Println("API Set SSID Failed", IP, iface, err)
@@ -444,6 +447,7 @@ func callAPIGetInterfaces(IP string, Token string) []InterfaceConfig {
 	req.Header.Add("Authorization", "Bearer "+Token)
 
 	c := http.Client{}
+	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		fmt.Println("API Get Interfaces failed", IP, err)
@@ -470,6 +474,7 @@ func callAPIGetStations(IP string, Token string, Iface string) []string {
 	req.Header.Add("Authorization", "Bearer "+Token)
 
 	c := http.Client{}
+	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		fmt.Println("API Get Stations failed", IP, err)
