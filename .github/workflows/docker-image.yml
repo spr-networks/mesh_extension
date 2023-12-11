@@ -51,7 +51,7 @@ jobs:
       - name: Set Matrix output
         id: set-matrix
         run: |
-          echo '::set-output name=matrix::${{ steps.get-images.outputs.result }}'
+          echo 'name=matrix::${{ steps.get-images.outputs.result }}' >> $GITHUB_OUTPUT
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
 
