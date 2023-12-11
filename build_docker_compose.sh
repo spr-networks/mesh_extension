@@ -1,5 +1,10 @@
 #!/bin/bash
 
+shopt -s expand_aliases
+if ! which docker-compose > /dev/null 2>&1; then
+    # Set an alias for docker-compose if it's missing
+    alias docker-compose='docker compose'
+fi
 
 FOUND_PREBUILT_IMAGE=false
 for SERVICE in $(docker-compose config --services); do
