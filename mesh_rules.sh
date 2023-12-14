@@ -75,27 +75,44 @@ table inet filter {
   map dhcp_access {
     type ifname . ether_addr: verdict;
   }
-
-  map upstream_tcp_port_drop {
-    type inet_service : verdict;
-    elements = {
-      22: drop,
-      80: drop,
-      443: drop,
-      5201: drop
-    }
+  
+  set uplink_interfaces {
+    type ifname;
+    $(if [ "$WANIF" ]; then echo "elements = { $WANIF }" ; fi )
   }
 
-  map spr_tcp_port_accept {
+  # this set contains wired lan, wired vlan, and wireless vlan clients
+  # dynamically updated
+  set lan_interfaces {
+    type ifname;
+    $(if [ "$LANIF" ]; then echo "elements = { $LANIF }" ; fi )
+  }
+
+  map wan_tcp_accept {
     type inet_service : verdict;
     elements = {
       22: accept,
       80: accept,
       443: accept,
-      5201: accept
     }
   }
 
+  map lan_tcp_accept {
+    type inet_service : verdict;
+    elements = {
+      22: accept,
+      80: accept,
+      443: accept,
+    }
+  }
+
+  map wan_udp_accept {
+    type inet_service : verdict;
+  }
+
+  map lan_udp_accept {
+    type inet_service : verdict;
+  }
 
   chain INPUT {
     type filter hook input priority 0; policy drop;
@@ -112,11 +129,11 @@ table inet filter {
     # When updating lan_udp_accept, updated this list.
     $(if [ "$WANIF" ]; then echo "iifname $WANIF udp dport {67, 1900, 5353} counter jump DROPLOGINP"; fi)
 
-    # drop ssh, iperf from upstream
-    $(if [ "$WANIF" ]; then echo "counter iifname $WANIF tcp dport vmap @upstream_tcp_port_drop"; fi)
+    #TCP Services
+    iifname @uplink_interfaces counter tcp dport vmap @wan_tcp_accept
+    # UDP services
+    iifname @uplink_interfaces counter udp dport vmap @wan_udp_accept
 
-    # Allow ssh, iperf3 from LAN and those not dropped from upstream (see upstream_tcp_port_drop)
-    counter tcp dport vmap @spr_tcp_port_accept
     counter jump DROPLOGINP
   }
 
