@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -97,6 +98,11 @@ type OTPUserRequest struct {
 type OTPSettings struct {
 	OTPUsers           []OTPUser
 	JWTDurationSeconds int64
+}
+
+type OTPSettingsRequest struct {
+	Token    string
+	Settings OTPSettings
 }
 
 type Token struct {
@@ -285,6 +291,10 @@ func callParentAPI(Path string, jsonValue []byte) {
 	defer Configmtx.Unlock()
 
 	config := loadConfigLocked()
+
+	if config.ParentIP == "" {
+		return
+	}
 
 	if config.ParentAPIToken == "" {
 		fmt.Println("[-] Mesh leaf not configured with parent API token, aborting call to", Path)
@@ -512,7 +522,8 @@ func callAPISetOTP(IP string, Token string, TLSCA string) {
 		return
 	}
 
-	jsonValue, _ := json.Marshal(settings)
+	request := OTPSettingsRequest{Settings: settings, Token: Token}
+	jsonValue, _ := json.Marshal(request)
 	req, err := http.NewRequest(http.MethodPut, "https://"+IP+"/plugins/mesh/setOTP", bytes.NewBuffer(jsonValue))
 	if err != nil {
 		return
@@ -676,7 +687,7 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 	//delete any partial matches in the existing list
 	for _, existing := range config.LeafRouters {
 		//match on either IP or API Token, and then delete it
-		if existing.IP == entry.IP || existing.APIToken == entry.APIToken {
+		if existing.IP == entry.IP || subtle.ConstantTimeCompare([]byte(existing.APIToken), []byte(entry.APIToken)) != 1 {
 			continue
 		} else {
 			newLeaves = append(newLeaves, existing)
@@ -813,20 +824,30 @@ func otpLoadLocked() (OTPSettings, error) {
 func setOTP(w http.ResponseWriter, r *http.Request) {
 	Tokensmtx.Lock()
 	defer Tokensmtx.Unlock()
-	settings, err := otpLoadLocked()
-	if err == nil && len(settings.OTPUsers) > 0 {
-		//refuse to overwrite otp
-		http.Error(w, "OTP Already Configured", 400)
-		return
-	}
 
-	settings = OTPSettings{}
-	err = json.NewDecoder(r.Body).Decode(&settings)
+	request := OTPSettingsRequest{}
+	err := json.NewDecoder(r.Body).Decode(&request)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
 
+	//verify that only the downhaul token was used to do this
+	// the downhaul token is owned by the parent SPR.
+	// it is not retrievable without a valid OTP code from either mesh or parent.
+
+	token, err := getToken(DOWNHAUL_TOKEN_NAME)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	if subtle.ConstantTimeCompare([]byte(token.Token), []byte(request.Token)) != 1 {
+		http.Error(w, "Invalid token to set OTP", 400)
+		return
+	}
+
+	settings := request.Settings
 	err = otpSaveLocked(settings)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
@@ -1002,7 +1023,7 @@ func chainTrustForNodeTLS(meshNode *LeafRouter) error {
 		return errors.New("missing hmac")
 	}
 
-	if hmac_given != hmac_expected {
+	if subtle.ConstantTimeCompare([]byte(hmac_given), []byte(hmac_expected)) != 1 {
 		return errors.New("invalid hmac")
 	}
 
