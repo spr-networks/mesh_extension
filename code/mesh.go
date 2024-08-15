@@ -506,10 +506,13 @@ func callAPISetSSID(IP string, Token string, TLSCA string, SSID string, iface st
 	}
 }
 
-func callAPISetOTP(IP string, Token string, TLSCA string, SSID string, iface string) {
-	val := map[string]string{}
-	val["Ssid"] = SSID
-	jsonValue, _ := json.Marshal(val)
+func callAPISetOTP(IP string, Token string, TLSCA string) {
+	settings, err := otpLoadLocked()
+	if err != nil && len(settings.OTPUsers) == 0 {
+		return
+	}
+
+	jsonValue, _ := json.Marshal(settings)
 	req, err := http.NewRequest(http.MethodPut, "https://"+IP+"/plugins/mesh/setOTP", bytes.NewBuffer(jsonValue))
 	if err != nil {
 		return
@@ -520,7 +523,7 @@ func callAPISetOTP(IP string, Token string, TLSCA string, SSID string, iface str
 	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
 	if err != nil {
-		fmt.Println("API Set SSID Failed", IP, iface, err)
+		fmt.Println("set OTP Failure")
 		return
 	}
 
@@ -528,7 +531,7 @@ func callAPISetOTP(IP string, Token string, TLSCA string, SSID string, iface str
 	_, err = ioutil.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		fmt.Println("API Set SSID Failed", IP, iface, resp.StatusCode)
+		fmt.Println("API Set OTP Failed", IP, resp.StatusCode)
 		return
 	}
 
@@ -686,9 +689,17 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
+
+		if entry.TLSCA == "" {
+			http.Error(w, "Failed to get mesh TLS Certificate", 400)
+			return
+		}
 		//add the new entry
 		newLeaves = append(newLeaves, entry)
 	}
+
+	//propagate the OTP settings from main to leaf node
+	callAPISetOTP(entry.IP, entry.APIToken, entry.TLSCA)
 
 	//save it
 	config.LeafRouters = newLeaves
