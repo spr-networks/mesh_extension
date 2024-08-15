@@ -987,11 +987,11 @@ func chainTrustForNodeTLS(meshNode *LeafRouter) error {
 		return err
 	}
 
-	if false && hmac_given == "" {
+	if hmac_given == "" {
 		return errors.New("missing hmac")
 	}
 
-	if false && hmac_given != hmac_expected {
+	if hmac_given != hmac_expected {
 		return errors.New("invalid hmac")
 	}
 
