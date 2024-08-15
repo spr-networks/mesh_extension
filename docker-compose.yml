@@ -16,8 +16,8 @@ services:
       labels: *default-labels
       x-bake:
         tags:
-        - ghcr.io/spr-networks/super_base:latest${RELEASE_CHANNEL:-}
-        - ghcr.io/spr-networks/super_base:${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
+        - ghcr.io/spr-networks/super_mesh:latest${RELEASE_CHANNEL:-}
+        - ghcr.io/spr-networks/super_mesh:${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
     network_mode: host
     privileged: true
     logging: *default-logging
@@ -25,7 +25,7 @@ services:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
       - "${SUPERDIR}./state/plugins/mesh:/state/plugins/mesh"
-      - "${SUPERDIR}./configs/base:/configs/auth"
+      - "${SUPERDIR}./configs/auth:/configs/auth"
       - "${SUPERDIR}./configs/base:/configs/base"
       - "${SUPERDIR}./configs/mesh:/configs/mesh"
       - "${SUPERDIR}./state/public/:/state/public/:ro"
