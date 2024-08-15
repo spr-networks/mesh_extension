@@ -1,5 +1,3 @@
-version: '3.4'
-
 x-logging:
   &default-logging
   driver: journald
@@ -27,6 +25,7 @@ services:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
       - "${SUPERDIR}./state/plugins/mesh:/state/plugins/mesh"
+      - "${SUPERDIR}./configs/base:/configs/auth"
       - "${SUPERDIR}./configs/base:/configs/base"
       - "${SUPERDIR}./configs/mesh:/configs/mesh"
       - "${SUPERDIR}./state/public/:/state/public/:ro"
