@@ -495,6 +495,19 @@ func syncDevices(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func syncOTP(w http.ResponseWriter, r *http.Request) {
+	Configmtx.Lock()
+	defer Configmtx.Unlock()
+
+	//for each subscribed leaf node, sync the devices
+	config := loadConfigLocked()
+	for _, entry := range config.LeafRouters {
+		//propagate the OTP settings from main to leaf node
+		callAPISetOTP(entry.IP, entry.APIToken, entry.TLSCA)
+	}
+
+}
+
 func callAPISetSSID(IP string, Token string, TLSCA string, SSID string, iface string) {
 	val := map[string]string{}
 	val["Ssid"] = SSID
@@ -553,7 +566,6 @@ func callAPISetOTP(IP string, Token string, TLSCA string) {
 		fmt.Println("API Set OTP Failed", IP, resp.StatusCode)
 		return
 	}
-
 }
 
 type InterfaceConfig struct {
@@ -716,9 +728,6 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 		//add the new entry
 		newLeaves = append(newLeaves, entry)
 	}
-
-	//propagate the OTP settings from main to leaf node
-	callAPISetOTP(entry.IP, entry.APIToken, entry.TLSCA)
 
 	//save it
 	config.LeafRouters = newLeaves
@@ -1117,6 +1126,7 @@ func main() {
 	unix_plugin_router.HandleFunc("/syncDevices", syncDevices).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setSSID", setSSID).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setOTP", setOTP).Methods("PUT")
+	unix_plugin_router.HandleFunc("/syncOTP", syncOTP).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setParentCredentials", setParentCredentials).Methods("PUT", "DELETE")
 	unix_plugin_router.HandleFunc("/cert", getCert).Methods("GET")
 
