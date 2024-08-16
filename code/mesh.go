@@ -1003,7 +1003,7 @@ func chainTrustForNodeTLS(meshNode *LeafRouter) error {
 	}
 
 	//note: this is unauthenticated
-	req, err := http.NewRequest(http.MethodGet, "https://"+meshNode.IP+"/plugins/mesh/cert", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://"+meshNode.IP+"/mesh/cert", nil)
 	if err != nil {
 		return errors.New("failed to create request")
 	}
