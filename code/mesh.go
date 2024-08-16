@@ -801,10 +801,13 @@ func setParentCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if creds.ParentCA == "" || nil != validateCA(creds.ParentCA) {
-		fmt.Println("[-] Need a valid CA for parent SPR")
-		http.Error(w, err.Error(), 400)
+	if creds.ParentCA == "" {
+		http.Error(w, "Missing CA for parent SPR", 400)
 		return
+	}
+	err = validateCA(creds.ParentCA)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
 	}
 
 	//parent credentials are used to inform the parent about events
