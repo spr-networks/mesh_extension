@@ -1028,7 +1028,7 @@ func chainTrustForNodeTLS(meshNode *LeafRouter) error {
 		return errors.New("wrong error code for cert request: " + fmt.Sprint(resp.StatusCode))
 	}
 
-	hmac_expected, err := createHMACSignatureWithData(data, "X-MESH|"+meshNode.APIToken)
+	hmac_expected, err := createHMACSignatureWithData(data, "X-MESH|"+DOWNHAUL_TOKEN_NAME+"|"+meshNode.APIToken)
 	if err != nil {
 		return err
 	}
