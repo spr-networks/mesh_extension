@@ -1112,6 +1112,7 @@ func main() {
 	unix_plugin_router.HandleFunc("/setSSID", setSSID).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setOTP", setOTP).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setParentCredentials", setParentCredentials).Methods("PUT", "DELETE")
+	unix_plugin_router.HandleFunc("/cert", getCert).Methods("GET")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
