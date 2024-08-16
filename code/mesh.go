@@ -725,6 +725,10 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 }
 
 func validateCA(certPEM string) error {
+	if certPEM == "" {
+		return errors.New("Missing CA String")
+	}
+
 	// Decode the PEM block
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil {
@@ -998,11 +1002,12 @@ func chainTrustForNodeTLS(meshNode *LeafRouter) error {
 		},
 	}
 
+	//note: this is unauthenticated
 	req, err := http.NewRequest(http.MethodGet, "https://"+meshNode.IP+"/plugins/mesh/cert", nil)
 	if err != nil {
 		return errors.New("failed to create request")
 	}
-	//req.Header.Add("Authorization", "Bearer "+meshNode.APIToken)
+	// we explicitly do not add an authorization header here
 
 	c := &http.Client{Transport: transport, Timeout: 10 * time.Second}
 	defer c.CloseIdleConnections()
