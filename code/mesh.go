@@ -523,7 +523,9 @@ func callAPISetSSID(IP string, Token string, TLSCA string, SSID string, iface st
 }
 
 func callAPISetOTP(IP string, Token string, TLSCA string) {
+	Tokensmtx.Lock()
 	settings, err := otpLoadLocked()
+	Tokensmtx.Unlock()
 	if err != nil && len(settings.OTPUsers) == 0 {
 		return
 	}
@@ -835,8 +837,6 @@ func otpLoadLocked() (OTPSettings, error) {
 }
 
 func setOTP(w http.ResponseWriter, r *http.Request) {
-	Tokensmtx.Lock()
-	defer Tokensmtx.Unlock()
 
 	request := OTPSettingsRequest{}
 	err := json.NewDecoder(r.Body).Decode(&request)
@@ -861,11 +861,14 @@ func setOTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	settings := request.Settings
+
+	Tokensmtx.Lock()
 	err = otpSaveLocked(settings)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	Tokensmtx.Unlock()
 }
 
 func leafMode(w http.ResponseWriter, r *http.Request) {
