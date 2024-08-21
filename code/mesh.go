@@ -12,8 +12,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -23,6 +31,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 import (
@@ -47,18 +56,24 @@ type DeviceEntry struct {
 
 var TEST_PREFIX = os.Getenv("TEST_PREFIX")
 var UNIX_PLUGIN_LISTENER = TEST_PREFIX + "/state/plugins/mesh/socket"
+var OTPSettingsFile = TEST_PREFIX + "/configs/auth/otp_settings.json"
+var AuthTokensFile = TEST_PREFIX + "/configs/auth/auth_tokens.json"
+var ApiTlsCaCert = TEST_PREFIX + "/configs/auth/cert/www-api-ca.crt"
 var BRIDGE_IFACE = "br0"
 
 var Configmtx sync.RWMutex
+var Tokensmtx sync.Mutex
 
 type LeafRouter struct {
 	APIToken string
 	IP       string
+	TLSCA    string
 }
 
 type ParentCredentials struct {
 	ParentIP       string
 	ParentAPIToken string
+	ParentCA       string
 }
 
 type MeshConfig struct {
@@ -66,7 +81,73 @@ type MeshConfig struct {
 	LeafRouters []LeafRouter
 }
 
+type OTPUser struct {
+	Name      string
+	Secret    string
+	Confirmed bool
+	AlwaysOn  bool
+}
+
+type OTPUserRequest struct {
+	Name           string
+	Code           string
+	UpdateAlwaysOn bool
+	AlwaysOn       bool
+}
+
+type OTPSettings struct {
+	OTPUsers           []OTPUser
+	JWTDurationSeconds int64
+}
+
+type OTPSettingsRequest struct {
+	Token    string
+	Settings OTPSettings
+}
+
+type Token struct {
+	Name        string
+	Token       string
+	Expire      int64
+	ScopedPaths []string
+}
+
 var MeshConfigFile = TEST_PREFIX + "/configs/mesh/config.json"
+
+func CATLSVerifierTransport(TLSCA []byte) http.Transport {
+	return http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				cert, err := x509.ParseCertificate(rawCerts[0])
+				if err != nil {
+					return err
+				}
+
+				caPool, err := CAPoolFromCABytes(TLSCA)
+				if err != nil {
+					return err
+				}
+
+				// Verify the server certificate using the CA
+				opts := x509.VerifyOptions{
+					Roots: caPool,
+				}
+
+				_, err = cert.Verify(opts)
+				if err != nil {
+					return err
+				}
+
+				return nil
+			},
+		},
+	}
+}
+func StandardTLSClient(tlsca string) http.Client {
+	transport := CATLSVerifierTransport([]byte(tlsca))
+	return http.Client{Timeout: 10 * time.Second, Transport: &transport}
+}
 
 func LeafRouterID() string {
 	//return our assigned IP address as the Router ID
@@ -83,7 +164,9 @@ func LeafRouterID() string {
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
+		if os.Getenv("DEBUGHTTP") != "" {
+			fmt.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
+		}
 		handler.ServeHTTP(w, r)
 	})
 }
@@ -211,18 +294,22 @@ func callParentAPI(Path string, jsonValue []byte) {
 
 	config := loadConfigLocked()
 
+	if config.ParentIP == "" {
+		return
+	}
+
 	if config.ParentAPIToken == "" {
 		fmt.Println("[-] Mesh leaf not configured with parent API token, aborting call to", Path)
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodPut, "http://"+config.ParentIP+"/"+Path, bytes.NewBuffer(jsonValue))
+	req, err := http.NewRequest(http.MethodPut, "https://"+config.ParentIP+"/"+Path, bytes.NewBuffer(jsonValue))
 	if err != nil {
 		return
 	}
 	req.Header.Add("Authorization", "Bearer "+config.ParentAPIToken)
 
-	c := http.Client{}
+	c := StandardTLSClient(config.ParentCA)
 	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
 	if err != nil {
@@ -342,6 +429,10 @@ func wifiDisconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !isLeafRouter() {
+		return
+	}
+
 	event.Router = LeafRouterID()
 
 	publishDisconnectEventParent(event)
@@ -359,15 +450,15 @@ func tinyRoute(ip string, delta uint32) string {
 	return routeIP
 }
 
-func callAPIDeviceSync(IP string, Token string, devices map[string]DeviceEntry) {
+func callAPIDeviceSync(IP string, Token string, TLSCA string, devices map[string]DeviceEntry) {
 	jsonValue, _ := json.Marshal(devices)
-	req, err := http.NewRequest(http.MethodPut, "http://"+IP+"/devices", bytes.NewBuffer(jsonValue))
+	req, err := http.NewRequest(http.MethodPut, "https://"+IP+"/devices", bytes.NewBuffer(jsonValue))
 	if err != nil {
 		return
 	}
 	req.Header.Add("Authorization", "Bearer "+Token)
 
-	c := http.Client{}
+	c := StandardTLSClient(TLSCA)
 	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
 	if err != nil {
@@ -399,22 +490,35 @@ func syncDevices(w http.ResponseWriter, r *http.Request) {
 	//for each subscribed leaf node, sync the devices
 	config := loadConfigLocked()
 	for _, entry := range config.LeafRouters {
-		callAPIDeviceSync(entry.IP, entry.APIToken, devices)
+		callAPIDeviceSync(entry.IP, entry.APIToken, entry.TLSCA, devices)
 	}
 
 }
 
-func callAPISetSSID(IP string, Token string, SSID string, iface string) {
+func syncOTP(w http.ResponseWriter, r *http.Request) {
+	Configmtx.Lock()
+	defer Configmtx.Unlock()
+
+	//for each subscribed leaf node, sync the devices
+	config := loadConfigLocked()
+	for _, entry := range config.LeafRouters {
+		//propagate the OTP settings from main to leaf node
+		callAPISetOTP(entry.IP, entry.APIToken, entry.TLSCA)
+	}
+
+}
+
+func callAPISetSSID(IP string, Token string, TLSCA string, SSID string, iface string) {
 	val := map[string]string{}
 	val["Ssid"] = SSID
 	jsonValue, _ := json.Marshal(val)
-	req, err := http.NewRequest(http.MethodPut, "http://"+IP+"/hostapd/"+iface+"/config", bytes.NewBuffer(jsonValue))
+	req, err := http.NewRequest(http.MethodPut, "https://"+IP+"/plugins/mesh/"+iface+"/config", bytes.NewBuffer(jsonValue))
 	if err != nil {
 		return
 	}
 	req.Header.Add("Authorization", "Bearer "+Token)
 
-	c := http.Client{}
+	c := StandardTLSClient(TLSCA)
 	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
 	if err != nil {
@@ -429,7 +533,39 @@ func callAPISetSSID(IP string, Token string, SSID string, iface string) {
 		fmt.Println("API Set SSID Failed", IP, iface, resp.StatusCode)
 		return
 	}
+}
 
+func callAPISetOTP(IP string, Token string, TLSCA string) {
+	Tokensmtx.Lock()
+	settings, err := otpLoadLocked()
+	Tokensmtx.Unlock()
+	if err != nil && len(settings.OTPUsers) == 0 {
+		return
+	}
+
+	request := OTPSettingsRequest{Settings: settings, Token: Token}
+	jsonValue, _ := json.Marshal(request)
+	req, err := http.NewRequest(http.MethodPut, "https://"+IP+"/plugins/mesh/setOTP", bytes.NewBuffer(jsonValue))
+	if err != nil {
+		return
+	}
+	req.Header.Add("Authorization", "Bearer "+Token)
+
+	c := StandardTLSClient(TLSCA)
+	defer c.CloseIdleConnections()
+	resp, err := c.Do(req)
+	if err != nil {
+		fmt.Println("set OTP Failure")
+		return
+	}
+
+	defer resp.Body.Close()
+	_, err = ioutil.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("API Set OTP Failed", IP, resp.StatusCode)
+		return
+	}
 }
 
 type InterfaceConfig struct {
@@ -438,15 +574,15 @@ type InterfaceConfig struct {
 	Enabled bool
 }
 
-func callAPIGetInterfaces(IP string, Token string) []InterfaceConfig {
+func callAPIGetInterfaces(IP string, Token string, TLSCA string) []InterfaceConfig {
 	ifaces := []InterfaceConfig{}
-	req, err := http.NewRequest(http.MethodGet, "http://"+IP+"/interfacesConfiguration", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://"+IP+"/interfacesConfiguration", nil)
 	if err != nil {
 		return ifaces
 	}
 	req.Header.Add("Authorization", "Bearer "+Token)
 
-	c := http.Client{}
+	c := StandardTLSClient(TLSCA)
 	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -464,10 +600,12 @@ func callAPIGetInterfaces(IP string, Token string) []InterfaceConfig {
 
 }
 
+/*
+//unused code
 func callAPIGetStations(IP string, Token string, Iface string) []string {
 	stations := []string{}
 	var data map[string]interface{}
-	req, err := http.NewRequest(http.MethodGet, "http://"+IP+"/"+Iface+"/all_stations", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://"+IP+"/"+Iface+"/all_stations", nil)
 	if err != nil {
 		return stations
 	}
@@ -493,7 +631,10 @@ func callAPIGetStations(IP string, Token string, Iface string) []string {
 
 	return stations
 }
+*/
 
+//unused code
+/*
 func getGlobalStations() []string {
 	stations := []string{}
 	Configmtx.Lock()
@@ -510,6 +651,7 @@ func getGlobalStations() []string {
 	}
 	return stations
 }
+*/
 
 func setSSID(w http.ResponseWriter, r *http.Request) {
 	SSID := ""
@@ -524,10 +666,10 @@ func setSSID(w http.ResponseWriter, r *http.Request) {
 	//for each subscribed leaf node, set the ssid
 	config := loadConfigLocked()
 	for _, entry := range config.LeafRouters {
-		ifaces := callAPIGetInterfaces(entry.IP, entry.APIToken)
+		ifaces := callAPIGetInterfaces(entry.IP, entry.APIToken, entry.TLSCA)
 		for _, iface := range ifaces {
 			if iface.Enabled && iface.Type == "AP" {
-				callAPISetSSID(entry.IP, entry.APIToken, SSID, iface.Name)
+				callAPISetSSID(entry.IP, entry.APIToken, entry.TLSCA, SSID, iface.Name)
 			}
 		}
 	}
@@ -553,13 +695,19 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	if entry.TLSCA != "" {
+		http.Error(w, "Field not accepted", 400)
+		return
+	}
+	// do not accept a TLSCA Arg
+	entry.TLSCA = ""
 
 	newLeaves := []LeafRouter{}
 
 	//delete any partial matches in the existing list
 	for _, existing := range config.LeafRouters {
 		//match on either IP or API Token, and then delete it
-		if existing.IP == entry.IP || existing.APIToken == entry.APIToken {
+		if existing.IP == entry.IP && subtle.ConstantTimeCompare([]byte(existing.APIToken), []byte(entry.APIToken)) != 1 {
 			continue
 		} else {
 			newLeaves = append(newLeaves, existing)
@@ -567,6 +715,16 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPut {
+		err = chainTrustForNodeTLS(&entry)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		if entry.TLSCA == "" {
+			http.Error(w, "Failed to get mesh TLS Certificate", 400)
+			return
+		}
 		//add the new entry
 		newLeaves = append(newLeaves, entry)
 	}
@@ -575,6 +733,52 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 	config.LeafRouters = newLeaves
 	saveConfigLocked(config)
 
+}
+
+func validateCA(certPEM string) error {
+	if certPEM == "" {
+		return errors.New("Missing CA String")
+	}
+
+	// Decode the PEM block
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return errors.New("failed to parse certificate PEM")
+	}
+
+	// Parse the certificate
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return errors.New("failed to parse certificate: " + err.Error())
+	}
+
+	// Check if it's a CA certificate
+	if !cert.IsCA {
+		return errors.New("certificate is not a CA certificate")
+	}
+
+	// Check if it's self-signed (issuer and subject should be the same)
+	if cert.Subject.String() != cert.Issuer.String() {
+		return errors.New("certificate is not self-signed (subject and issuer do not match)")
+	}
+
+	// Verify the signature
+	if err := cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature); err != nil {
+		return errors.New("certificate signature verification failed: " + err.Error())
+	}
+
+	// Check if the certificate is expired
+	now := time.Now()
+	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+		return errors.New("certificate is not valid at the current time")
+	}
+
+	// Check Basic Constraints
+	if cert.MaxPathLen == 0 && !cert.MaxPathLenZero {
+		return errors.New("CA certificate does not have basic constraints set properly")
+	}
+
+	return nil
 }
 
 func setParentCredentials(w http.ResponseWriter, r *http.Request) {
@@ -604,8 +808,17 @@ func setParentCredentials(w http.ResponseWriter, r *http.Request) {
 
 	ip := net.ParseIP(creds.ParentIP)
 	if ip == nil {
-		http.Error(w, fmt.Errorf("invalid ip "+creds.ParentIP).Error(), 400)
+		http.Error(w, "invalid ip "+creds.ParentIP, 400)
 		return
+	}
+
+	if creds.ParentCA == "" {
+		http.Error(w, "Missing CA for parent SPR", 400)
+		return
+	}
+	err = validateCA(creds.ParentCA)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
 	}
 
 	//parent credentials are used to inform the parent about events
@@ -613,6 +826,58 @@ func setParentCredentials(w http.ResponseWriter, r *http.Request) {
 	config.ParentAPIToken = creds.ParentAPIToken
 
 	saveConfigLocked(config)
+
+	//+
+}
+
+func otpSaveLocked(settings OTPSettings) error {
+	file, _ := json.MarshalIndent(settings, "", " ")
+	return ioutil.WriteFile(OTPSettingsFile, file, 0600)
+}
+
+func otpLoadLocked() (OTPSettings, error) {
+	settings := OTPSettings{}
+	data, err := os.ReadFile(OTPSettingsFile)
+	if err == nil {
+		err = json.Unmarshal(data, &settings)
+	}
+
+	return settings, err
+}
+
+func setOTP(w http.ResponseWriter, r *http.Request) {
+
+	request := OTPSettingsRequest{}
+	err := json.NewDecoder(r.Body).Decode(&request)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	//verify that only the downhaul token was used to do this
+	// the downhaul token is owned by the parent SPR.
+	// it is not retrievable without a valid OTP code from either mesh or parent.
+
+	token, err := getToken(DOWNHAUL_TOKEN_NAME)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	if subtle.ConstantTimeCompare([]byte(token.Token), []byte(request.Token)) != 1 {
+		http.Error(w, "Invalid token to set OTP", 400)
+		return
+	}
+
+	settings := request.Settings
+
+	Tokensmtx.Lock()
+	err = otpSaveLocked(settings)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	Tokensmtx.Unlock()
 }
 
 func leafMode(w http.ResponseWriter, r *http.Request) {
@@ -628,15 +893,215 @@ func leafMode(w http.ResponseWriter, r *http.Request) {
 		} else if action == "disable" {
 			setLeafRouter(false)
 		} else {
-			http.Error(w, fmt.Errorf("invalid enable param").Error(), 400)
+			http.Error(w, "invalid enable param", 400)
 			return
 		}
 	} else {
 		val := isLeafRouter()
 		json.NewEncoder(w).Encode(val)
 	}
-
 }
+
+func getToken(name string) (Token, error) {
+	tokens := []Token{}
+	Tokensmtx.Lock()
+	data, err := os.ReadFile(AuthTokensFile)
+	Tokensmtx.Unlock()
+	if err != nil {
+		return Token{}, err
+	}
+
+	err = json.Unmarshal(data, &tokens)
+	if err != nil {
+		return Token{}, err
+	}
+
+	for _, tok := range tokens {
+		if tok.Name == name {
+			return tok, nil
+		}
+	}
+
+	return Token{}, fmt.Errorf("token not found")
+}
+
+var DOWNHAUL_TOKEN_NAME = "PLUS-MESH-API-DOWNHAUL-TOKEN"
+
+func getCertApiKey(r *http.Request) string {
+
+	/*
+
+		//in the future, we might allow the parent SPR to also have this endpoint,
+		//but for now, only the leaf node case is handled
+
+		Configmtx.Lock()
+		config := loadConfigLocked()
+		Configmtx.Unlock()
+
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			return ""
+		}
+
+		//we knew about this leaf router IP, thats requesting,
+		// we must be the parent then.
+		for _, router := range config.LeafRouters {
+			if router.IP == ip {
+				return DOWNHAUL_TOKEN_NAME + "|" + router.APIToken
+			}
+		}
+	*/
+	// we are then possibly a leaf node, look up our key to use instead
+	token, err := getToken(DOWNHAUL_TOKEN_NAME)
+	if err == nil {
+		return DOWNHAUL_TOKEN_NAME + "|" + token.Token
+	}
+
+	//failed
+	return ""
+}
+
+var HMACHeader = "X-SPR-Mesh-TLS-Hash"
+
+func getCert(w http.ResponseWriter, r *http.Request) {
+	apikey := getCertApiKey(r)
+
+	if apikey != "" {
+		sig, err := createHMACSignatureWithFile(ApiTlsCaCert, "X-MESH|"+apikey)
+		if err == nil {
+			w.Header().Set(HMACHeader, sig)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	http.ServeFile(w, r, ApiTlsCaCert)
+}
+
+func CAPoolFromCABytes(data []byte) (*x509.CertPool, error) {
+	err := validateCA(string(data))
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the received CA certificate
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("failed to parse certificate PEM")
+	}
+
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	caPool := x509.NewCertPool()
+	caPool.AddCert(caCert)
+
+	return caPool, nil
+}
+
+func chainTrustForNodeTLS(meshNode *LeafRouter) error {
+	var serverCert *x509.Certificate
+
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				cert, err := x509.ParseCertificate(rawCerts[0])
+				if err != nil {
+					return err
+				}
+				serverCert = cert
+				return nil
+			},
+		},
+	}
+
+	//note: this is unauthenticated
+	req, err := http.NewRequest(http.MethodGet, "https://"+meshNode.IP+"/mesh/cert", nil)
+	if err != nil {
+		return errors.New("failed to create request")
+	}
+	// we explicitly do not add an authorization header here
+
+	c := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	defer c.CloseIdleConnections()
+	resp, err := c.Do(req)
+	if err != nil {
+		return errors.New("failed make cert request")
+	}
+
+	hmac_given := resp.Header.Get(HMACHeader)
+
+	defer resp.Body.Close()
+	data, err := ioutil.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return errors.New("wrong error code for cert request: " + fmt.Sprint(resp.StatusCode))
+	}
+
+	hmac_expected, err := createHMACSignatureWithData(data, "X-MESH|"+DOWNHAUL_TOKEN_NAME+"|"+meshNode.APIToken)
+	if err != nil {
+		return err
+	}
+
+	if hmac_given == "" {
+		return errors.New("missing hmac")
+	}
+
+	if subtle.ConstantTimeCompare([]byte(hmac_given), []byte(hmac_expected)) != 1 {
+		return errors.New("invalid hmac")
+	}
+
+	if serverCert == nil {
+		return errors.New("server certificate not captured")
+	}
+
+	caPool, err := CAPoolFromCABytes(data)
+	if err != nil {
+		return err
+	}
+
+	// Verify the server certificate using the CA
+	opts := x509.VerifyOptions{
+		Roots: caPool,
+	}
+
+	_, err = serverCert.Verify(opts)
+	if err != nil {
+		return errors.New("server certificate not signed by provided CA")
+	}
+
+	meshNode.TLSCA = string(data)
+	return nil
+}
+
+func createHMACSignatureWithData(data []byte, keymaterial string) (string, error) {
+
+	// Hash the keymaterial with SHA256
+	h := sha256.New()
+	h.Write([]byte(keymaterial))
+	key := h.Sum(nil)
+
+	// Create HMAC signature
+	hmacSigner := hmac.New(sha256.New, key)
+	hmacSigner.Write(data)
+	signature := hmacSigner.Sum(nil)
+
+	signatureHex := hex.EncodeToString(signature)
+
+	return signatureHex, nil
+}
+
+func createHMACSignatureWithFile(filename string, keymaterial string) (string, error) {
+	// Read the file
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return "", err
+	}
+	return createHMACSignatureWithData(data, keymaterial)
+}
+
 func main() {
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
@@ -660,7 +1125,10 @@ func main() {
 	//these are routines for synchronizing from a central router to a leaf router
 	unix_plugin_router.HandleFunc("/syncDevices", syncDevices).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setSSID", setSSID).Methods("PUT")
+	unix_plugin_router.HandleFunc("/setOTP", setOTP).Methods("PUT")
+	unix_plugin_router.HandleFunc("/syncOTP", syncOTP).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setParentCredentials", setParentCredentials).Methods("PUT", "DELETE")
+	unix_plugin_router.HandleFunc("/cert", getCert).Methods("GET")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
