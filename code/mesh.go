@@ -695,9 +695,12 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	if entry.TLSCA != "" {
-		http.Error(w, "Field not accepted", 400)
-		return
+
+	if r.Method == http.MethodPut {
+		if entry.TLSCA != "" {
+			http.Error(w, "Field not accepted", 400)
+			return
+		}
 	}
 	// do not accept a TLSCA Arg
 	entry.TLSCA = ""
@@ -707,7 +710,7 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 	//delete any partial matches in the existing list
 	for _, existing := range config.LeafRouters {
 		//match on either IP or API Token, and then delete it
-		if existing.IP == entry.IP && subtle.ConstantTimeCompare([]byte(existing.APIToken), []byte(entry.APIToken)) != 1 {
+		if existing.IP == entry.IP && subtle.ConstantTimeCompare([]byte(existing.APIToken), []byte(entry.APIToken)) == 1 {
 			continue
 		} else {
 			newLeaves = append(newLeaves, existing)
