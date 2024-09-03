@@ -290,9 +290,8 @@ func isLeafRouter() bool {
 
 func callParentAPI(Path string, jsonValue []byte) {
 	Configmtx.Lock()
-	defer Configmtx.Unlock()
-
 	config := loadConfigLocked()
+	Configmtx.Unlock()
 
 	if config.ParentIP == "" {
 		return
@@ -485,10 +484,10 @@ func syncDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	Configmtx.Lock()
-	defer Configmtx.Unlock()
+	config := loadConfigLocked()
+	Configmtx.Unlock()
 
 	//for each subscribed leaf node, sync the devices
-	config := loadConfigLocked()
 	for _, entry := range config.LeafRouters {
 		callAPIDeviceSync(entry.IP, entry.APIToken, entry.TLSCA, devices)
 	}
@@ -497,10 +496,10 @@ func syncDevices(w http.ResponseWriter, r *http.Request) {
 
 func syncOTP(w http.ResponseWriter, r *http.Request) {
 	Configmtx.Lock()
-	defer Configmtx.Unlock()
-
 	//for each subscribed leaf node, sync the devices
 	config := loadConfigLocked()
+	Configmtx.Unlock()
+
 	for _, entry := range config.LeafRouters {
 		//propagate the OTP settings from main to leaf node
 		callAPISetOTP(entry.IP, entry.APIToken, entry.TLSCA)
@@ -662,9 +661,11 @@ func setSSID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	Configmtx.Lock()
-	defer Configmtx.Unlock()
 	//for each subscribed leaf node, set the ssid
 	config := loadConfigLocked()
+
+	Configmtx.Unlock()
+
 	for _, entry := range config.LeafRouters {
 		ifaces := callAPIGetInterfaces(entry.IP, entry.APIToken, entry.TLSCA)
 		for _, iface := range ifaces {
@@ -678,16 +679,16 @@ func setSSID(w http.ResponseWriter, r *http.Request) {
 
 func leafRouters(w http.ResponseWriter, r *http.Request) {
 	Configmtx.Lock()
-	defer Configmtx.Unlock()
 	config := loadConfigLocked()
+	Configmtx.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(config.LeafRouters)
 }
 
 func leafRouter(w http.ResponseWriter, r *http.Request) {
 	Configmtx.Lock()
-	defer Configmtx.Unlock()
 	config := loadConfigLocked()
+	Configmtx.Unlock()
 
 	entry := LeafRouter{}
 	err := json.NewDecoder(r.Body).Decode(&entry)
@@ -786,8 +787,8 @@ func validateCA(certPEM string) error {
 
 func setParentCredentials(w http.ResponseWriter, r *http.Request) {
 	Configmtx.Lock()
-	defer Configmtx.Unlock()
 	config := loadConfigLocked()
+	Configmtx.Unlock()
 
 	if r.Method == http.MethodDelete {
 		config.ParentIP = ""
