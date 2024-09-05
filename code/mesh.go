@@ -511,7 +511,7 @@ func callAPISetSSID(IP string, Token string, TLSCA string, SSID string, iface st
 	val := map[string]string{}
 	val["Ssid"] = SSID
 	jsonValue, _ := json.Marshal(val)
-	req, err := http.NewRequest(http.MethodPut, "https://"+IP+"/plugins/mesh/"+iface+"/config", bytes.NewBuffer(jsonValue))
+	req, err := http.NewRequest(http.MethodPut, "https://"+IP+"/hostapd/"+iface+"/config", bytes.NewBuffer(jsonValue))
 	if err != nil {
 		return
 	}

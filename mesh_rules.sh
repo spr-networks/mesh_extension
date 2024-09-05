@@ -7,7 +7,11 @@ iptables -P INPUT DROP
 conntrack -D
 
 # Enable ARP filter
-sysctl net.ipv4.conf.all.arp_filter=1
+sysctl -w net.ipv4.conf.all.arp_filter=1
+# we will not use iptables for the bridge 
+sysctl -w net.bridge.bridge-nf-call-iptables=0
+sysctl -w net.bridge.bridge-nf-call-ip6tables=0
+
 
 # Create the bridge interface
 ip link add name br0 type bridge
