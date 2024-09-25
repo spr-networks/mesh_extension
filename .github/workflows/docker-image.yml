@@ -7,7 +7,7 @@ on:
       - completed
     branches: [ main, dev ]
   push:
-    branches: [ cosign-test ]
+    branches: [ dev ]
 
 jobs:
 
@@ -54,8 +54,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           platforms: linux/amd64,linux/arm64
-          provenance: false
           push: ${{ (github.event_name == 'workflow_run' && github.ref_name == 'main') || (env.RELEASE_CHANNEL != '' && github.event_name == 'push') }}
+          tags: |
+            ghcr.io/spr-networks/mesh_extension_mesh:${{ env.RELEASE_VERSION || 'latest' }}
+            ghcr.io/spr-networks/mesh_extension_mesh:latest
 
       - name: Get images from docker-compose.yml
         id: get-images
@@ -64,19 +66,12 @@ jobs:
           cmd: yq -o json -I 0 '[.services|.[]|.image]' docker-compose.yml
 
       - name: Sign the images with GitHub OIDC Token
+        if: ${{ (github.event_name == 'workflow_run' && github.ref_name == 'main') || (env.RELEASE_CHANNEL != '' && github.event_name == 'push') }}
         env:
-          DIGEST: ${{ steps.build-and-push.outputs.digest }}
-          TAGS: ${{ steps.get-images.outputs.result }}
-          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
-          RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}
+          IMG1: ghcr.io/spr-networks/mesh_extension_mesh:${{ env.RELEASE_VERSION || 'latest' }}@${{ steps.build-and-push.outputs.digest }}
+          IMG2: ghcr.io/spr-networks/mesh_extension_mesh:latest@${{ steps.build-and-push.outputs.digest }}
         run: |
-          images=$(echo '${{ steps.get-images.outputs.result }}' | jq -r '.[]')
-          image_list=""
-          for image in $images; do
-            expanded_image=$(echo "$image" | envsubst)
-            image_list+="${expanded_image}@${DIGEST} "
-          done
-          cosign sign --yes ${image_list}
+          cosign sign --yes ${{ env.IMG1 }} ${{ env.IMG2 }}
 
       - name: Set Matrix output
         id: set-matrix
