@@ -6,11 +6,17 @@ on:
     types:
       - completed
     branches: [ main, dev ]
+  push:
+    branches: [ cosign-test ]
 
 jobs:
 
   buildx:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     steps:
       -
         name: Checkout
@@ -26,6 +32,12 @@ jobs:
       -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+
+      # Install the cosign tool
+      # https://github.com/sigstore/cosign-installer
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.6.0
+
       -
         name: Set up Docker Buildx
         id: buildx
@@ -36,19 +48,31 @@ jobs:
       -
         name: build options
         run: echo "tags:" "*.platform=linux/amd64,linux/arm64" "tags=mesh_extension_mesh:${RELEASE_VERSION:-latest}"
-      -
-        name: Build and push containers
-        run: |
-          ./build_docker_compose.sh \
-            --set "*.platform=linux/amd64,linux/arm64" \
-            --set "*.tags=ghcr.io/spr-networks/mesh_extension_mesh:${RELEASE_VERSION:-latest}" \
-            --set "*.tags=ghcr.io/spr-networks/mesh_extension_mesh:latest" \
-            `[[ "${{ github.event_name }}" =~ ^(push|workflow_run)$  ]] && [ "${{ github.ref_name }}" = "main" ] && echo "--push"`
+
+      - name: Build and push
+        id: build-and-push
+        uses: docker/build-push-action@v6
+        with:
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          push: ${{ (github.event_name == 'workflow_run' && github.ref_name == 'main') || (env.RELEASE_CHANNEL != '' && github.event_name == 'push') }}
+
       - name: Get images from docker-compose.yml
         id: get-images
         uses: mikefarah/yq@master
         with:
           cmd: yq -o json -I 0 '[.services|.[]|.image]' docker-compose.yml
+
+      - name: Sign the images with GitHub OIDC Token
+        env:
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+          TAGS: ${{ steps.get-images.outputs.result }}
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
+          done
+          cosign sign --yes ${images}
 
       - name: Set Matrix output
         id: set-matrix
