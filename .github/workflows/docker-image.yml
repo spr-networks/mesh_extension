@@ -67,12 +67,16 @@ jobs:
         env:
           DIGEST: ${{ steps.build-and-push.outputs.digest }}
           TAGS: ${{ steps.get-images.outputs.result }}
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+          RELEASE_CHANNEL: ${{ env.RELEASE_CHANNEL }}
         run: |
-          images=""
-          for tag in ${TAGS}; do
-            images+="${tag}@${DIGEST} "
+          images=$(echo '${{ steps.get-images.outputs.result }}' | jq -r '.[]')
+          image_list=""
+          for image in $images; do
+            expanded_image=$(echo "$image" | envsubst)
+            image_list+="${expanded_image}@${DIGEST} "
           done
-          cosign sign --yes ${images}
+          cosign sign --yes ${image_list}
 
       - name: Set Matrix output
         id: set-matrix
