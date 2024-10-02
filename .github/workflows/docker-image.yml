@@ -17,6 +17,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      attestations: write
     steps:
       -
         name: Checkout
@@ -73,10 +74,20 @@ jobs:
         run: |
           cosign sign --yes ${{ env.IMG1 }} ${{ env.IMG2 }}
 
+      - name: Attest Build Provenance
+        if: ${{ (github.event_name == 'push' && github.ref_name == 'main') }}
+        id: attest-latest
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ghcr.io/spr-networks/mesh_extension_mesh
+          subject-digest: ${{ steps.build-and-push.outputs.digest }}
+          push-to-registry: true
+
       - name: Set Matrix output
         id: set-matrix
         run: |
           echo 'name=matrix::${{ steps.get-images.outputs.result }}' >> $GITHUB_OUTPUT
+
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
 
