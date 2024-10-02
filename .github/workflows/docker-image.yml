@@ -81,7 +81,7 @@ jobs:
         with:
           subject-name: ghcr.io/spr-networks/mesh_extension_mesh
           subject-digest: ${{ steps.build-and-push.outputs.digest }}
-          push-to-registry: true
+          push-to-registry: false
 
       - name: Set Matrix output
         id: set-matrix
