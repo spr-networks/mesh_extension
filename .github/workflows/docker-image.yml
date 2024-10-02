@@ -75,7 +75,7 @@ jobs:
           cosign sign --yes ${{ env.IMG1 }} ${{ env.IMG2 }}
 
       - name: Attest Build Provenance
-        if: ${{ (github.event_name == 'push' && github.ref_name == 'main') }}
+        if: ${{ (github.event_name == 'workflow_run' && github.ref_name == 'main') || (env.RELEASE_CHANNEL != '' && github.event_name == 'push') }}
         id: attest-latest
         uses: actions/attest-build-provenance@v1
         with:
