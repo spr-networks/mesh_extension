@@ -94,3 +94,13 @@ This is required to push down the wifi passwords and mac addresses.
 
 When a mesh node gets a wifi connect, disconnect, or password failure, it will use
 its api key to report the event to the main router, which will handle it accordingly.
+
+
+During startup, the main SPR API will re-create mesh state by polling all leaf routers once (see /allLeafStations).
+
+The poll fixes an edge case where the main SPR API has restarted but a wifi client is still connected to a mesh node.
+Under those conditions the wifi client would not dhcp and the SPR API would be unaware of the route for the device.
+By polling, the SPR API re-creates the routing state for that client. 
+
+
+
