@@ -1106,6 +1106,116 @@ func createHMACSignatureWithFile(filename string, keymaterial string) (string, e
 	return createHMACSignatureWithData(data, keymaterial)
 }
 
+// StationInfo represents the parsed hostapd station information
+type StationInfo map[string]string
+
+// LeafStations represents all stations from a leaf router
+type LeafStations struct {
+	LeafIP   string
+	Stations map[string]StationInfo // MAC -> station info
+	Error    error
+}
+
+// callAPIAllStations calls the all_stations endpoint for a specific interface
+func callAPIAllStations(IP string, Token string, TLSCA string, iface string) (map[string]map[string]string, error) {
+	url := fmt.Sprintf("https://%s/hostapd/%s/all_stations", IP, iface)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Authorization", "Bearer "+Token)
+
+	// Create custom client with 3 second timeout
+	transport := CATLSVerifierTransport([]byte(TLSCA))
+	client := http.Client{
+		Timeout:   3 * time.Second,
+		Transport: &transport,
+	}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to poll %s interface %s: %v", IP, iface, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("leaf %s returned status %d for interface %s", IP, resp.StatusCode, iface)
+	}
+
+	var stationData map[string]map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&stationData); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	return stationData, nil
+}
+
+// pollLeafRouterStations polls a single leaf router for connected stations
+func pollLeafRouterStations(leafRouter LeafRouter) LeafStations {
+	result := LeafStations{
+		LeafIP:   leafRouter.IP,
+		Stations: make(map[string]StationInfo),
+	}
+
+	// First, get the list of interfaces from the leaf router
+	interfaces := callAPIGetInterfaces(leafRouter.IP, leafRouter.APIToken, leafRouter.TLSCA)
+
+	// Poll each AP interface
+	for _, iface := range interfaces {
+		if !iface.Enabled || iface.Type != "AP" {
+			continue
+		}
+
+		stationData, err := callAPIAllStations(leafRouter.IP, leafRouter.APIToken, leafRouter.TLSCA, iface.Name)
+		if err != nil {
+			result.Error = err
+			continue
+		}
+
+		// Merge stations from this interface
+		for mac, info := range stationData {
+			result.Stations[mac] = StationInfo(info)
+		}
+	}
+
+	return result
+}
+
+// getAllLeafStations polls all leaf routers concurrently for connected stations
+func getAllLeafStations() map[string]LeafStations {
+	Configmtx.RLock()
+	config := loadConfigLocked()
+	leafRouters := config.LeafRouters
+	Configmtx.RUnlock()
+
+	results := make(map[string]LeafStations)
+	resultsChan := make(chan LeafStations, len(leafRouters))
+
+	// Poll all leaf routers concurrently
+	for _, leafRouter := range leafRouters {
+		go func(lr LeafRouter) {
+			resultsChan <- pollLeafRouterStations(lr)
+		}(leafRouter)
+	}
+
+	// Collect results
+	for i := 0; i < len(leafRouters); i++ {
+		result := <-resultsChan
+		results[result.LeafIP] = result
+	}
+
+	return results
+}
+
+// API handler to get all stations from all leaf routers
+func getAllStationsHandler(w http.ResponseWriter, r *http.Request) {
+	stations := getAllLeafStations()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stations)
+}
+
 func main() {
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
@@ -1133,6 +1243,9 @@ func main() {
 	unix_plugin_router.HandleFunc("/syncOTP", syncOTP).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setParentCredentials", setParentCredentials).Methods("PUT", "DELETE")
 	unix_plugin_router.HandleFunc("/cert", getCert).Methods("GET")
+
+	// Get all stations from all leaf routers
+	unix_plugin_router.HandleFunc("/allLeafStations", getAllStationsHandler).Methods("GET")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
