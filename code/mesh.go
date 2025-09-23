@@ -687,16 +687,17 @@ func leafRouters(w http.ResponseWriter, r *http.Request) {
 }
 
 func leafRouter(w http.ResponseWriter, r *http.Request) {
-	Configmtx.Lock()
-	config := loadConfigLocked()
-	Configmtx.Unlock()
-
 	entry := LeafRouter{}
 	err := json.NewDecoder(r.Body).Decode(&entry)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+
+	Configmtx.Lock()
+	config := loadConfigLocked()
+	defer Configmtx.Unlock()
+
 
 	if r.Method == http.MethodPut {
 		if entry.TLSCA != "" {
@@ -878,11 +879,13 @@ func setOTP(w http.ResponseWriter, r *http.Request) {
 
 	Tokensmtx.Lock()
 	err = otpSaveLocked(settings)
+	Tokensmtx.Unlock()
+
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	Tokensmtx.Unlock()
+
 }
 
 func leafMode(w http.ResponseWriter, r *http.Request) {
