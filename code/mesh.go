@@ -787,21 +787,21 @@ func validateCA(certPEM string) error {
 }
 
 func setParentCredentials(w http.ResponseWriter, r *http.Request) {
+	creds := ParentCredentials{}
+	err := json.NewDecoder(r.Body).Decode(&creds)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
 	Configmtx.Lock()
 	config := loadConfigLocked()
-	Configmtx.Unlock()
+	defer Configmtx.Unlock()
 
 	if r.Method == http.MethodDelete {
 		config.ParentIP = ""
 		config.ParentAPIToken = ""
 		saveConfigLocked(config)
-		return
-	}
-
-	creds := ParentCredentials{}
-	err := json.NewDecoder(r.Body).Decode(&creds)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
 		return
 	}
 
@@ -824,6 +824,7 @@ func setParentCredentials(w http.ResponseWriter, r *http.Request) {
 	err = validateCA(creds.ParentCA)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
+		return
 	}
 
 	//parent credentials are used to inform the parent about events
@@ -831,7 +832,6 @@ func setParentCredentials(w http.ResponseWriter, r *http.Request) {
 	config.ParentAPIToken = creds.ParentAPIToken
 
 	saveConfigLocked(config)
-
 	//+
 }
 
