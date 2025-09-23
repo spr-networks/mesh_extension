@@ -390,6 +390,7 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 type WifiConnectFailureEvent struct {
+	Iface  string
 	Type   string
 	MAC    string
 	Reason string
