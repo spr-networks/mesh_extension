@@ -585,8 +585,14 @@ func callAPIGetInterfaces(IP string, Token string, TLSCA string) []InterfaceConf
 	c := StandardTLSClient(TLSCA)
 	defer c.CloseIdleConnections()
 	resp, err := c.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		fmt.Println("API Get Interfaces failed", IP, err)
+		return ifaces
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("API Get Interfaces failed", IP, resp.StatusCode)
 		return ifaces
 	}
 
@@ -809,7 +815,7 @@ func setParentCredentials(w http.ResponseWriter, r *http.Request) {
 
 	if creds.ParentAPIToken == "" {
 		fmt.Println("[-] Invalid API Token")
-		http.Error(w, err.Error(), 400)
+		http.Error(w, "Invalid API Token", 400)
 		return
 	}
 
