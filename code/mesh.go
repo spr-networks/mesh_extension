@@ -802,6 +802,7 @@ func setParentCredentials(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete {
 		config.ParentIP = ""
 		config.ParentAPIToken = ""
+		config.ParentCA = ""
 		saveConfigLocked(config)
 		return
 	}
@@ -831,6 +832,7 @@ func setParentCredentials(w http.ResponseWriter, r *http.Request) {
 	//parent credentials are used to inform the parent about events
 	config.ParentIP = creds.ParentIP
 	config.ParentAPIToken = creds.ParentAPIToken
+	config.ParentCA = creds.ParentCA
 
 	saveConfigLocked(config)
 	//+
