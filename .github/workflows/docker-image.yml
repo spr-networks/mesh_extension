@@ -74,54 +74,77 @@ jobs:
         run: |
           cosign sign --yes ${{ env.IMG1 }} ${{ env.IMG2 }}
 
-      # Install the cosign tool
-      # https://github.com/sigstore/cosign-installer
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.6.0
-
-      - name: Sign the images with GitHub OIDC Token
-        if: ${{ github.event_name == 'workflow_run' && github.ref_name == 'main' || env.RELEASE_CHANNEL != '' && github.event_name == 'push' }}
+      # actions/attest-build-provenance needs GitHub Enterprise on private
+      # repos, so the provenance attestation is done with cosign instead:
+      # keyless via the GitHub OIDC token, stored in the registry next to the
+      # image, logged in Rekor.
+      - name: Generate SLSA provenance predicate
+        if: ${{ (github.event_name == 'workflow_run' && github.ref_name == 'main') || (env.RELEASE_CHANNEL != '' && github.event_name == 'push') }}
         run: |
-          cosign sign --yes ${{ steps.extract_info.outputs.IMAGE_INFO }}
+          cat > /tmp/predicate.json <<EOF
+          {
+            "buildDefinition": {
+              "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+              "externalParameters": {
+                "workflow": {
+                  "ref": "${{ github.ref }}",
+                  "repository": "${{ github.server_url }}/${{ github.repository }}",
+                  "path": ".github/workflows/docker-image.yml"
+                }
+              },
+              "internalParameters": {
+                "github": {
+                  "event_name": "${{ github.event_name }}",
+                  "repository_id": "${{ github.repository_id }}",
+                  "repository_owner_id": "${{ github.repository_owner_id }}"
+                }
+              },
+              "resolvedDependencies": [
+                {
+                  "uri": "git+${{ github.server_url }}/${{ github.repository }}@${{ github.ref }}",
+                  "digest": { "gitCommit": "${{ github.sha }}" }
+                }
+              ]
+            },
+            "runDetails": {
+              "builder": {
+                "id": "${{ github.server_url }}/${{ github.repository }}/.github/workflows/docker-image.yml@${{ github.ref }}"
+              },
+              "metadata": {
+                "invocationId": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}"
+              }
+            }
+          }
+          EOF
 
-      - name: Prepare Attestation Matrix
-        id: container_digests
+      - name: Attest build provenance with GitHub OIDC Token
+        if: ${{ (github.event_name == 'workflow_run' && github.ref_name == 'main') || (env.RELEASE_CHANNEL != '' && github.event_name == 'push') }}
+        env:
+          IMG: ghcr.io/spr-networks/mesh_extension_mesh@${{ steps.build-and-push.outputs.digest }}
         run: |
-          matrix=$(echo ${{ steps.extract_info.outputs.IMAGE_INFO }} | jq -R -s -c 'split(" ") | map(split("@") | {name:  (.[0] | split(":")[0]), digest: .[1] | rtrimstr("\n") }) | group_by(.name) | map(.[0]) ')
-          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+          cosign attest --yes --type slsaprovenance1 --predicate /tmp/predicate.json ${{ env.IMG }}
+
+      - name: Verify signature and attestation
+        if: ${{ (github.event_name == 'workflow_run' && github.ref_name == 'main') || (env.RELEASE_CHANNEL != '' && github.event_name == 'push') }}
+        env:
+          IMG: ghcr.io/spr-networks/mesh_extension_mesh@${{ steps.build-and-push.outputs.digest }}
+        run: |
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github\.com/spr-networks/mesh_extension/\.github/workflows/docker-image\.yml@' \
+            ${{ env.IMG }}
+          cosign verify-attestation --type slsaprovenance1 \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github\.com/spr-networks/mesh_extension/\.github/workflows/docker-image\.yml@' \
+            ${{ env.IMG }}
 
       - name: Set Matrix output
         id: set-matrix
         run: |
-          echo 'name=matrix::${{ steps.get-images.outputs.result }}' >> $GITHUB_OUTPUT
+          echo "matrix=${{ steps.get-images.outputs.result }}" >> $GITHUB_OUTPUT
 
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
-      container_digests: ${{ steps.container_digests.outputs.matrix}}
-
-  attest:
-    permissions:
-      contents: read
-      id-token: write
-      packages: write
-      attestations: write
-    needs: buildx
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        image: ${{ fromJSON(needs.build-images.outputs.container_digests) }}
-
-    steps:
-      -
-        name: Authenticate to ghcr
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-      - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-name: ${{ matrix.image.name }}
-          subject-digest: ${{ matrix.image.digest }}
-          push-to-registry: true
 
 #  sbom:
 #    name: Generate SBOMs
