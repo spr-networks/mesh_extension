@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -226,24 +225,44 @@ func getExistingBridgeSet() []ifaceMacKey {
 
 	//jq .nftables[1].map.elem[][0].concat
 	var data map[string]interface{}
-	err = json.Unmarshal(stdout, &data)
+	if err = json.Unmarshal(stdout, &data); err != nil {
+		fmt.Println("nft json parse error", err)
+		return existing
+	}
 	data2, ok := data["nftables"].([]interface{})
-	if ok != true {
-		log.Fatal("invalid json")
+	if !ok || len(data2) < 2 {
+		fmt.Println("nft json: missing nftables array")
+		return existing
 	}
 	data3, ok := data2[1].(map[string]interface{})
+	if !ok {
+		return existing
+	}
 	data4, ok := data3["map"].(map[string]interface{})
+	if !ok {
+		return existing
+	}
 	data5, ok := data4["elem"].([]interface{})
+	if !ok {
+		return existing
+	}
 	for _, d := range data5 {
 		e, ok := d.([]interface{})
+		if !ok || len(e) < 1 {
+			continue
+		}
 		f, ok := e[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
 		g, ok := f["concat"].([]interface{})
-		if ok {
-			iface, ok := g[0].(string)
-			mac, ok := g[1].(string)
-			if ok {
-				existing = append(existing, ifaceMacKey{iface, mac})
-			}
+		if !ok || len(g) < 2 {
+			continue
+		}
+		iface, okIface := g[0].(string)
+		mac, okMac := g[1].(string)
+		if okIface && okMac {
+			existing = append(existing, ifaceMacKey{iface, mac})
 		}
 	}
 	return existing
@@ -276,7 +295,7 @@ func setLeafRouter(enabled bool) {
 	if enabled == false {
 		os.Remove(MESH_ENABLED_LEAF_PATH)
 	} else {
-		os.Create(MESH_ENABLED_LEAF_PATH)
+		os.WriteFile(MESH_ENABLED_LEAF_PATH, nil, 0600)
 	}
 }
 
