@@ -8,7 +8,8 @@ set -a
 # shellcheck disable=SC1091
 . ./reproducible.env
 set +a
-export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --pretty=%ct 2>/dev/null || echo 0)}"
+# Epoch 0 so rewrite-timestamp's clamp normalizes every file mtime.
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
 echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
 
 BAKE_SET=()
@@ -36,6 +37,14 @@ done
 [ "$FOUND_PREBUILT_IMAGE" = "true" ] && docker image prune -f
 
 if docker --help | grep -q buildx; then
+  # Recreate super-builder if its BuildKit image doesn't match BUILDKIT_REF.
+  if docker buildx inspect super-builder >/dev/null 2>&1; then
+    CURRENT_BUILDKIT=$(docker buildx inspect super-builder \
+      | sed -n 's/.*image="\([^"]*\)".*/\1/p' | head -1)
+    if [ -n "${BUILDKIT_REF}" ] && [ "$CURRENT_BUILDKIT" != "${BUILDKIT_REF}" ]; then
+      docker buildx rm super-builder
+    fi
+  fi
   docker buildx create --name super-builder --driver docker-container \
     --driver-opt "image=${BUILDKIT_REF}" 2>/dev/null || true
   # Always export with rewrite-timestamp; map --load/--push onto the exporter.
