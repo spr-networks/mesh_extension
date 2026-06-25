@@ -12,6 +12,10 @@ set +a
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
 echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
 
+# Strip group/world write so COPY layer modes don't depend on the umask of
+# whoever ran git checkout.
+[ -d .git ] && find . -path ./.git -prune -o -exec chmod go-w {} +
+
 BAKE_SET=()
 while IFS='=' read -r k v; do
   case "$k" in ''|\#*) continue;; esac
