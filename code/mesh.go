@@ -1254,10 +1254,12 @@ type LeafTopology struct {
 	Topology json.RawMessage
 }
 
-func callAPIGetTopology(IP string, Token string, TLSCA string) (json.RawMessage, error) {
+//returns the topology document and whether the leaf host answered at all --
+//an older leaf API without /topology still proves the leaf is reachable
+func callAPIGetTopology(IP string, Token string, TLSCA string) (json.RawMessage, bool) {
 	req, err := http.NewRequest("GET", "https://"+IP+"/topology", nil)
 	if err != nil {
-		return nil, err
+		return nil, false
 	}
 	req.Header.Add("Authorization", "Bearer "+Token)
 
@@ -1270,15 +1272,21 @@ func callAPIGetTopology(IP string, Token string, TLSCA string) (json.RawMessage,
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to poll %s topology: %v", IP, err)
+		fmt.Println("failed to poll topology", IP, err)
+		return nil, false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("leaf %s returned status %d for topology", IP, resp.StatusCode)
+		fmt.Println("leaf topology status", IP, resp.StatusCode)
+		return nil, true
 	}
 
-	return ioutil.ReadAll(resp.Body)
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, true
+	}
+	return data, true
 }
 
 func getAllLeafTopologies() []LeafTopology {
@@ -1290,8 +1298,8 @@ func getAllLeafTopologies() []LeafTopology {
 	resultsChan := make(chan LeafTopology, len(leafRouters))
 	for _, leafRouter := range leafRouters {
 		go func(lr LeafRouter) {
-			topology, err := callAPIGetTopology(lr.IP, lr.APIToken, lr.TLSCA)
-			resultsChan <- LeafTopology{LeafIP: lr.IP, Online: err == nil, Topology: topology}
+			topology, reachable := callAPIGetTopology(lr.IP, lr.APIToken, lr.TLSCA)
+			resultsChan <- LeafTopology{LeafIP: lr.IP, Online: reachable, Topology: topology}
 		}(leafRouter)
 	}
 
