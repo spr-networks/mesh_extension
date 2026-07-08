@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1247,6 +1248,70 @@ func getAllStationsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(stations)
 }
 
+type LeafTopology struct {
+	LeafIP   string
+	Online   bool
+	Topology json.RawMessage
+}
+
+func callAPIGetTopology(IP string, Token string, TLSCA string) (json.RawMessage, error) {
+	req, err := http.NewRequest("GET", "https://"+IP+"/topology", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Authorization", "Bearer "+Token)
+
+	transport := CATLSVerifierTransport([]byte(TLSCA))
+	c := http.Client{
+		Timeout:   3 * time.Second,
+		Transport: &transport,
+	}
+	defer c.CloseIdleConnections()
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to poll %s topology: %v", IP, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("leaf %s returned status %d for topology", IP, resp.StatusCode)
+	}
+
+	return ioutil.ReadAll(resp.Body)
+}
+
+func getAllLeafTopologies() []LeafTopology {
+	Configmtx.RLock()
+	config := loadConfigLocked()
+	leafRouters := config.LeafRouters
+	Configmtx.RUnlock()
+
+	resultsChan := make(chan LeafTopology, len(leafRouters))
+	for _, leafRouter := range leafRouters {
+		go func(lr LeafRouter) {
+			topology, err := callAPIGetTopology(lr.IP, lr.APIToken, lr.TLSCA)
+			resultsChan <- LeafTopology{LeafIP: lr.IP, Online: err == nil, Topology: topology}
+		}(leafRouter)
+	}
+
+	results := []LeafTopology{}
+	for i := 0; i < len(leafRouters); i++ {
+		results = append(results, <-resultsChan)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].LeafIP < results[j].LeafIP
+	})
+
+	return results
+}
+
+func getLeafTopologiesHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(getAllLeafTopologies())
+}
+
 func main() {
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
@@ -1277,6 +1342,7 @@ func main() {
 
 	// Get all stations from all leaf routers
 	unix_plugin_router.HandleFunc("/allLeafStations", getAllStationsHandler).Methods("GET")
+	unix_plugin_router.HandleFunc("/leafTopologies", getLeafTopologiesHandler).Methods("GET")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
