@@ -11,7 +11,7 @@ x-labels:
 services:
   mesh:
     container_name: supermesh
-    image: containers.plus.supernetworks.org/spr-networks/mesh_extension_mesh:${RELEASE_VERSION:-latest}
+    image: ghcr.io/spr-networks/mesh_extension_mesh:${RELEASE_VERSION:-latest}
     build:
       context: .
       labels: *default-labels
