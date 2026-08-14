@@ -1145,7 +1145,7 @@ type StationInfo map[string]string
 type LeafStations struct {
 	LeafIP   string
 	Stations map[string]StationInfo // MAC -> station info
-	Error    error
+	Error    string                 `json:",omitempty"`
 }
 
 // callAPIAllStations calls the all_stations endpoint for a specific interface
@@ -1201,7 +1201,7 @@ func pollLeafRouterStations(leafRouter LeafRouter) LeafStations {
 
 		stationData, err := callAPIAllStations(leafRouter.IP, leafRouter.APIToken, leafRouter.TLSCA, iface.Name)
 		if err != nil {
-			result.Error = err
+			result.Error = err.Error()
 			continue
 		}
 
