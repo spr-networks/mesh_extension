@@ -12,7 +12,7 @@ ALPINE_TAG=alpine:latest
 DOCKERFILE_TAG=docker/dockerfile:1
 BUILDKIT_TAG=moby/buildkit:buildx-stable-1
 CONTAINER_TEMPLATE_TAG=ghcr.io/spr-networks/container_template:latest
-GO_MINOR=1.25
+GO_MINOR=1.26
 
 mdigest() { docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}'; }
 
