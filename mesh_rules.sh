@@ -15,23 +15,64 @@ sysctl -w net.bridge.bridge-nf-call-ip6tables=0
 
 # Create the bridge interface
 ip link add name br0 type bridge
-ip link set dev $WANIF down
+ip link set dev "$WANIF" down
 
 # Assign the bridge the WANIF MAC
 # Give WANIF the ephemeral bridge MAC,
 #  and the bridge the WANIF MAC
 # And allow the bridge to receive a MAC address
-WANMAC=$(ip -br link show dev ${WANIF} | awk '{print $3}')
+INTERFACES_CONFIG=${INTERFACES_CONFIG:-/configs/base/interfaces.json}
+CONFIGURED_WANMAC=$(
+  grep -Eo '"(Name|MACOverride|MACRandomize)"[[:space:]]*:[[:space:]]*("[^"]*"|true|false)' -- "$INTERFACES_CONFIG" 2>/dev/null |
+    awk -v wanif="$WANIF" '
+      function emit() {
+        if (!done && name == wanif && randomize != "true" && mac != "") {
+          print mac
+          done = 1
+        }
+      }
+      {
+        key = $0
+        sub(/^"/, "", key)
+        sub(/".*/, "", key)
+        value = $0
+        sub(/^[^:]*:[[:space:]]*/, "", value)
+        gsub(/^"|"$/, "", value)
+        if (key == "Name") {
+          emit()
+          if (done) {
+            exit
+          }
+          name = value
+          mac = ""
+          randomize = "false"
+        } else if (key == "MACOverride") {
+          mac = value
+        } else if (key == "MACRandomize") {
+          randomize = value
+        }
+      }
+      END {
+        emit()
+      }
+    '
+)
+CONFIGURED_WANMAC=${CONFIGURED_WANMAC//-/:}
+if [[ "$CONFIGURED_WANMAC" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+  WANMAC=$CONFIGURED_WANMAC
+else
+  WANMAC=$(ip -br link show dev "$WANIF" | awk '{print $3}')
+fi
 BRMAC=$(ip -br link show dev br0 | awk '{print $3}')
-ip link set dev $WANIF address ${BRMAC}
-ip link set dev br0 up
-ip link set dev br0 address ${WANMAC}
-ip link set dev $WANIF up
+ip link set dev "$WANIF" address "$BRMAC"
 
 # Add the upstream interface to the bridge
-ip link set dev $WANIF master br0
-dhclient -r $WANIF
-ip address flush dev $WANIF
+ip link set dev "$WANIF" master br0
+ip link set dev br0 address "$WANMAC"
+ip link set dev br0 up
+ip link set dev "$WANIF" up
+dhclient -r "$WANIF"
+ip address flush dev "$WANIF"
 # TBD should use our own dhcp client
 dhclient br0
 
