@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -41,7 +42,12 @@ func meshHostapdCommand(iface, command string) (string, error) {
 		return "", fmt.Errorf("invalid AP interface %q", iface)
 	}
 	local := fmt.Sprintf("%s/control-%d-%d", TEST_PREFIX+"/state/plugins/mesh", os.Getpid(), meshSocketID.Add(1))
-	defer os.Remove(local)
+	if runtime.GOOS == "linux" {
+		// Use an abstract socket
+		local = "@spr-mesh-" + strings.TrimPrefix(local, TEST_PREFIX+"/state/plugins/mesh/")
+	} else {
+		defer os.Remove(local)
+	}
 	remote := meshWifiDir + "/control_" + iface + "/" + iface
 	conn, err := net.DialUnix("unixgram", &net.UnixAddr{Name: local, Net: "unixgram"}, &net.UnixAddr{Name: remote, Net: "unixgram"})
 	if err != nil {
@@ -75,17 +81,17 @@ func meshValues(output string) map[string]string {
 	return values
 }
 
-func meshLocalBSSes() []MeshBSS {
+func meshLocalBSSes() ([]MeshBSS, error) {
 	data, err := os.ReadFile(meshInterfacesPath)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("read mesh interfaces: %w", err)
 	}
 	var interfaces []struct {
 		InterfaceConfig
 		ExtraBSS []json.RawMessage
 	}
-	if json.Unmarshal(data, &interfaces) != nil {
-		return nil
+	if err := json.Unmarshal(data, &interfaces); err != nil {
+		return nil, fmt.Errorf("decode mesh interfaces %s: %w", meshInterfacesPath, err)
 	}
 	var names []string
 	for _, entry := range interfaces {
@@ -104,6 +110,7 @@ func meshLocalBSSes() []MeshBSS {
 		}
 		statusRaw, err := meshHostapd(iface, "STATUS")
 		if err != nil {
+			fmt.Println("mesh local BSS", iface, "STATUS", err)
 			continue
 		}
 		status := meshValues(statusRaw)
@@ -112,6 +119,7 @@ func meshLocalBSSes() []MeshBSS {
 		}
 		configRaw, err := meshHostapd(iface, "GET_CONFIG")
 		if err != nil {
+			fmt.Println("mesh local BSS", iface, "GET_CONFIG", err)
 			continue
 		}
 		live := meshValues(configRaw)
@@ -122,6 +130,7 @@ func meshLocalBSSes() []MeshBSS {
 		}
 		reports, err := meshHostapd(iface, "SHOW_NEIGHBOR")
 		if err != nil {
+			fmt.Println("mesh local BSS", iface, "SHOW_NEIGHBOR", err)
 			continue
 		}
 		keys := strings.Fields(live["key_mgmt"])
@@ -140,7 +149,7 @@ func meshLocalBSSes() []MeshBSS {
 			break
 		}
 	}
-	return bsses
+	return bsses, nil
 }
 
 func validMeshBSS(bss MeshBSS) bool {
@@ -162,11 +171,15 @@ func meshApplyNeighbors(all []MeshBSS) error {
 			return errors.New("invalid mesh AP")
 		}
 	}
+	locals, err := meshLocalBSSes()
+	if err != nil {
+		return err
+	}
 	previous := map[string][]meshNeighborKey{}
 	if data, err := os.ReadFile(meshNeighborStatePath); err == nil {
 		_ = json.Unmarshal(data, &previous)
 	}
-	for _, local := range meshLocalBSSes() {
+	for _, local := range locals {
 		want := map[meshNeighborKey]bool{}
 		localMAC, _ := net.ParseMAC(local.BSSID)
 		for _, peer := range all {
@@ -233,7 +246,11 @@ func syncMeshNeighbors() {
 	}
 	meshSyncMu.Lock()
 	defer meshSyncMu.Unlock()
-	all := meshLocalBSSes()
+	all, err := meshLocalBSSes()
+	if err != nil {
+		fmt.Println("mesh local inventory", err)
+		return
+	}
 	if len(all) == 0 {
 		return // Wi-Fi is restarting.
 	}
@@ -293,8 +310,13 @@ func meshNeighborLoop() {
 }
 
 func meshBSSesHandler(w http.ResponseWriter, _ *http.Request) {
+	bsses, err := meshLocalBSSes()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(meshLocalBSSes())
+	_ = json.NewEncoder(w).Encode(bsses)
 }
 
 func meshNeighborsHandler(w http.ResponseWriter, r *http.Request) {
