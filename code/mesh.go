@@ -203,6 +203,7 @@ func getMeshConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func initMesh() {
+	go meshNeighborLoop()
 
 }
 
@@ -724,7 +725,6 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 	config := loadConfigLocked()
 	defer Configmtx.Unlock()
 
-
 	if r.Method == http.MethodPut {
 		if entry.TLSCA != "" {
 			http.Error(w, "Field not accepted", 400)
@@ -764,6 +764,7 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 	//save it
 	config.LeafRouters = newLeaves
 	saveConfigLocked(config)
+	go syncMeshNeighbors()
 
 }
 
@@ -1254,8 +1255,6 @@ type LeafTopology struct {
 	Topology json.RawMessage
 }
 
-//returns the topology document and whether the leaf host answered at all --
-//an older leaf API without /topology still proves the leaf is reachable
 func callAPIGetTopology(IP string, Token string, TLSCA string) (json.RawMessage, bool) {
 	req, err := http.NewRequest("GET", "https://"+IP+"/topology", nil)
 	if err != nil {
@@ -1343,6 +1342,8 @@ func main() {
 	//these are routines for synchronizing from a central router to a leaf router
 	unix_plugin_router.HandleFunc("/syncDevices", syncDevices).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setSSID", setSSID).Methods("PUT")
+	unix_plugin_router.HandleFunc("/bsses", meshBSSesHandler).Methods("GET")
+	unix_plugin_router.HandleFunc("/neighbors", meshNeighborsHandler).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setOTP", setOTP).Methods("PUT")
 	unix_plugin_router.HandleFunc("/syncOTP", syncOTP).Methods("PUT")
 	unix_plugin_router.HandleFunc("/setParentCredentials", setParentCredentials).Methods("PUT", "DELETE")

@@ -30,3 +30,4 @@ services:
       - "${SUPERDIR}./configs/base:/configs/base"
       - "${SUPERDIR}./configs/mesh:/configs/mesh"
       - "${SUPERDIR}./state/public/:/state/public/:ro"
+      - "${SUPERDIR}./state/wifi/:/state/wifi/:ro"

@@ -31,7 +31,7 @@ RUN set -eux; \
 ENV PATH="/usr/local/go/bin:${PATH}" GOTOOLCHAIN=local
 WORKDIR /code
 COPY code/ /code/
-RUN --mount=type=tmpfs,target=/root/go/ go build -trimpath -ldflags "-s -w" -o /mesh /code/mesh.go
+RUN --mount=type=tmpfs,target=/root/go/ go build -trimpath -ldflags "-s -w" -o /mesh .
 
 FROM ${CONTAINER_TEMPLATE_REF}
 ENV DEBIAN_FRONTEND=noninteractive
