@@ -103,9 +103,13 @@ func meshLocalBSSes() ([]MeshBSS, error) {
 			names = append(names, fmt.Sprintf("%s.ap%d", entry.Name, i))
 		}
 	}
+	if len(names) == 0 {
+		fmt.Println("mesh local inventory: no enabled AP interfaces in", meshInterfacesPath)
+	}
 	bsses := []MeshBSS{}
 	for _, iface := range names {
 		if !meshIfaceRE.MatchString(iface) {
+			fmt.Printf("mesh local BSS %q: invalid interface name\n", iface)
 			continue
 		}
 		statusRaw, err := meshHostapd(iface, "STATUS")
@@ -115,6 +119,7 @@ func meshLocalBSSes() ([]MeshBSS, error) {
 		}
 		status := meshValues(statusRaw)
 		if status["state"] != "ENABLED" {
+			fmt.Printf("mesh local BSS %s: hostapd state=%q\n", iface, status["state"])
 			continue
 		}
 		configRaw, err := meshHostapd(iface, "GET_CONFIG")
@@ -136,17 +141,24 @@ func meshLocalBSSes() ([]MeshBSS, error) {
 		keys := strings.Fields(live["key_mgmt"])
 		sort.Strings(keys)
 		security := strings.Join([]string{live["wpa"], strings.Join(keys, " "), live["group_cipher"], live["rsn_pairwise_cipher"]}, "|")
+		found := false
 		for _, line := range strings.Split(reports, "\n") {
 			fields := strings.Fields(line)
 			if len(fields) == 0 || !strings.EqualFold(fields[0], bssid) {
 				continue
 			}
+			found = true
 			values := meshValues(strings.Join(fields[1:], "\n"))
 			bss := MeshBSS{iface, fields[0], values["ssid"], values["nr"], security}
 			if validMeshBSS(bss) {
 				bsses = append(bsses, bss)
+			} else {
+				fmt.Printf("mesh local BSS %s: invalid self neighbor report for %s\n", iface, bssid)
 			}
 			break
+		}
+		if !found {
+			fmt.Printf("mesh local BSS %s: SHOW_NEIGHBOR has no entry for local BSSID %q\n", iface, bssid)
 		}
 	}
 	return bsses, nil
@@ -158,6 +170,24 @@ func validMeshBSS(bss MeshBSS) bool {
 	nr, nrErr := hex.DecodeString(bss.NR)
 	return err == nil && len(mac) == 6 && ssidErr == nil && len(ssid) > 0 && len(ssid) <= 32 &&
 		nrErr == nil && len(nr) >= 13 && len(nr) <= 255 && bytes.Equal(nr[:6], mac) && nr[10] != 0 && nr[11] != 0
+}
+
+func meshSecurityCompatible(a, b string) bool {
+	left, right := strings.Split(a, "|"), strings.Split(b, "|")
+	if len(left) != 4 || len(right) != 4 || left[0] != right[0] || left[1] != right[1] || left[2] != right[2] {
+		return false
+	}
+	if left[3] == right[3] {
+		return true
+	}
+	for _, cipher := range strings.Fields(left[3]) {
+		for _, other := range strings.Fields(right[3]) {
+			if cipher == other {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func meshApplyNeighbors(all []MeshBSS) error {
@@ -184,7 +214,7 @@ func meshApplyNeighbors(all []MeshBSS) error {
 		localMAC, _ := net.ParseMAC(local.BSSID)
 		for _, peer := range all {
 			mac, _ := net.ParseMAC(peer.BSSID)
-			if mac.String() == localMAC.String() || peer.SSID != local.SSID || peer.Security != local.Security {
+			if mac.String() == localMAC.String() || peer.SSID != local.SSID || !meshSecurityCompatible(peer.Security, local.Security) {
 				continue
 			}
 			key := meshNeighborKey{mac.String(), peer.SSID}
