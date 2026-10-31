@@ -65,9 +65,11 @@ var Configmtx sync.RWMutex
 var Tokensmtx sync.Mutex
 
 type LeafRouter struct {
-	APIToken string
-	IP       string
-	TLSCA    string
+	APIToken      string
+	IP            string
+	TLSCA         string
+	MACsec        *LeafMACsec `json:",omitempty"`
+	MACsecPending bool        `json:",omitempty"`
 }
 
 type ParentCredentials struct {
@@ -79,6 +81,7 @@ type ParentCredentials struct {
 type MeshConfig struct {
 	ParentCredentials
 	LeafRouters []LeafRouter
+	LeafMACsec  LeafSideMACsec
 }
 
 type OTPUser struct {
@@ -187,7 +190,7 @@ func loadConfigLocked() MeshConfig {
 
 func saveConfigLocked(config MeshConfig) {
 	file, _ := json.MarshalIndent(config, "", " ")
-	err := ioutil.WriteFile(MeshConfigFile, file, 0600)
+	err := atomicWriteFile(MeshConfigFile, file)
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -204,6 +207,8 @@ func getMeshConfig(w http.ResponseWriter, r *http.Request) {
 
 func initMesh() {
 	go meshNeighborLoop()
+	go gMACsec.run()
+	go macsecPendingLoop()
 
 }
 
@@ -721,6 +726,12 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	entry.MACsec = nil
+
+	if r.Method == http.MethodDelete {
+		macsecReleaseLeaf(entry)
+	}
+
 	Configmtx.Lock()
 	config := loadConfigLocked()
 	defer Configmtx.Unlock()
@@ -735,11 +746,13 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 	entry.TLSCA = ""
 
 	newLeaves := []LeafRouter{}
+	var preservedMACsec *LeafMACsec
 
 	//delete any partial matches in the existing list
 	for _, existing := range config.LeafRouters {
 		//match on either IP or API Token, and then delete it
 		if existing.IP == entry.IP && subtle.ConstantTimeCompare([]byte(existing.APIToken), []byte(entry.APIToken)) == 1 {
+			preservedMACsec = existing.MACsec
 			continue
 		} else {
 			newLeaves = append(newLeaves, existing)
@@ -758,14 +771,37 @@ func leafRouter(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		//add the new entry
+		entry.MACsec = preservedMACsec
+		if entry.MACsec != nil && entry.MACsec.Enabled {
+			entry.MACsecPending = false
+		}
 		newLeaves = append(newLeaves, entry)
 	}
 
 	//save it
 	config.LeafRouters = newLeaves
 	saveConfigLocked(config)
-	go syncMeshNeighbors()
+	go meshSyncNeighbors()
+	gMACsec.Kick()
 
+}
+
+var meshSyncNeighbors = syncMeshNeighbors
+
+func macsecReleaseLeaf(entry LeafRouter) {
+	macsecChangeMtx.Lock()
+	defer macsecChangeMtx.Unlock()
+	Configmtx.Lock()
+	config := loadConfigLocked()
+	Configmtx.Unlock()
+	for _, existing := range config.LeafRouters {
+		if !sameLeaf(existing, entry) || existing.MACsec == nil || !existing.MACsec.Enabled {
+			continue
+		}
+		if _, err := macsecCallLeaf(existing, macsecPeerRequest{Token: existing.APIToken, Enable: false}); err != nil {
+			fmt.Println("[-] macsec: could not release leaf", existing.IP, err)
+		}
+	}
 }
 
 func validateCA(certPEM string) error {
@@ -1332,6 +1368,9 @@ func main() {
 	//adding a leaf router to a central router
 	unix_plugin_router.HandleFunc("/leafRouters", leafRouters).Methods("GET")
 	unix_plugin_router.HandleFunc("/leafRouter", leafRouter).Methods("PUT", "DELETE")
+	unix_plugin_router.HandleFunc("/leafRouter/macsec", leafRouterMACsec).Methods("PUT")
+	unix_plugin_router.HandleFunc("/macsec/peer", macsecPeer).Methods("PUT")
+	unix_plugin_router.HandleFunc("/macsec/status", macsecStatusHandler).Methods("GET")
 
 	//good use case for event bus
 	// these are called by the API on-device into the mesh plugin

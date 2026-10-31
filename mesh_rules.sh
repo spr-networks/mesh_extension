@@ -13,6 +13,25 @@ sysctl -w net.bridge.bridge-nf-call-iptables=0
 sysctl -w net.bridge.bridge-nf-call-ip6tables=0
 
 
+MESH_MACSEC_FLAG=${MESH_MACSEC_FLAG:-/configs/base/mesh_macsec_required}
+MESH_BRIF_DIR=${MESH_BRIF_DIR:-/sys/class/net/br0/brif}
+MESH_UPLINK=$WANIF
+MACSEC_REQUIRED=
+if [ -f "$MESH_MACSEC_FLAG" ]; then
+  MACSEC_REQUIRED=1
+fi
+
+mesh_uplink_bridged() {
+  local port
+  for port in "$MESH_BRIF_DIR"/*; do
+    port=${port##*/}
+    case "$port" in
+      macsec[0-9]*|"$MESH_UPLINK") return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # Create the bridge interface
 ip link add name br0 type bridge
 ip link set dev "$WANIF" down
@@ -66,15 +85,31 @@ fi
 BRMAC=$(ip -br link show dev br0 | awk '{print $3}')
 ip link set dev "$WANIF" address "$BRMAC"
 
-# Add the upstream interface to the bridge
-ip link set dev "$WANIF" master br0
+if [ "$MACSEC_REQUIRED" ]; then
+  ip link set dev "$WANIF" nomaster
+  sysctl -w "net/ipv6/conf/$WANIF/disable_ipv6=1"
+else
+  # Add the upstream interface to the bridge
+  ip link set dev "$WANIF" master br0
+fi
 ip link set dev br0 address "$WANMAC"
 ip link set dev br0 up
-ip link set dev "$WANIF" up
+if [ -z "$MACSEC_REQUIRED" ]; then
+  ip link set dev "$WANIF" up
+fi
 dhclient -r "$WANIF"
 ip address flush dev "$WANIF"
 # TBD should use our own dhcp client
-dhclient br0
+if [ "$MACSEC_REQUIRED" ]; then
+  (
+    until mesh_uplink_bridged; do
+      sleep 1
+    done
+    dhclient br0
+  ) &
+else
+  dhclient br0
+fi
 
 # Clean previous rules
 iptables --flush
@@ -209,6 +244,16 @@ table inet filter {
 
 EOF
 
+if [ "$MACSEC_REQUIRED" ]; then
+  nft -f - << EOF
+table netdev mesh_macsec_guard {
+  chain ingress {
+    type filter hook ingress device "$MESH_UPLINK" priority -500; policy drop;
+    ether type { 0x888e, 0x88e5, 0x88b5 } accept
+  }
+}
+EOF
+fi
 
 # Accept input
 iptables -P INPUT ACCEPT
