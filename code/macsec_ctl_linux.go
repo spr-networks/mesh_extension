@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+const meshCtlMSS = 1200
+
+func meshCtlDialControl(network, address string, c syscall.RawConn) error {
+	var serr error
+	if err := c.Control(func(fd uintptr) {
+		serr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG, meshCtlMSS)
+	}); err != nil {
+		return err
+	}
+	return serr
+}
+
 func htons(v uint16) uint16 {
 	return v<<8 | v>>8
 }
@@ -50,7 +62,7 @@ func recvRawFrames(dev string, timeout time.Duration, handle func([]byte) bool) 
 	}
 	defer syscall.Close(fd)
 	deadline := time.Now().Add(timeout)
-	buf := make([]byte, 2048)
+	buf := make([]byte, 65536)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -58,6 +70,44 @@ func recvRawFrames(dev string, timeout time.Duration, handle func([]byte) bool) 
 		}
 		if remaining > 500*time.Millisecond {
 			remaining = 500 * time.Millisecond
+		}
+		tv := syscall.NsecToTimeval(remaining.Nanoseconds())
+		if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+			return err
+		}
+		n, _, err := syscall.Recvfrom(fd, buf, 0)
+		if err != nil {
+			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			return err
+		}
+		if handle(buf[:n]) {
+			return nil
+		}
+	}
+}
+
+func exchangeRawFrame(dev string, frame []byte, timeout time.Duration, handle func([]byte) bool) error {
+	if len(frame) < 14 {
+		return errors.New("short frame")
+	}
+	fd, ifindex, err := openPacketSocket(dev, macsecCtlEtherType)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	sa := &syscall.SockaddrLinklayer{Protocol: htons(macsecCtlEtherType), Ifindex: ifindex, Halen: 6}
+	copy(sa.Addr[:], frame[:6])
+	if err := syscall.Sendto(fd, frame, 0, sa); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	buf := make([]byte, 65536)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return errMACsecCtlNoAck
 		}
 		tv := syscall.NsecToTimeval(remaining.Nanoseconds())
 		if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {

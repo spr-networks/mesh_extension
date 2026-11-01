@@ -18,9 +18,12 @@ const (
 	macsecCtlMagic             = "SPRMSEC1"
 	macsecCtlDisable      byte = 1
 	macsecCtlAck          byte = 2
+	macsecCtlProbe        byte = 3
+	macsecCtlProbeReply   byte = 4
 	macsecCtlChallengeLen      = 16
 	macsecCtlMACLen            = 32
-	macsecCtlPayloadLen        = len(macsecCtlMagic) + 1 + macsecCKNLen + macsecCtlChallengeLen + macsecCtlMACLen
+	macsecCtlPayloadLen        = len(macsecCtlMagic) + 1 + macsecCKNLen + macsecCtlChallengeLen + 2 + macsecCtlMACLen
+	macsecProbeWait            = time.Second
 	macsecCtlFrameLen          = 14 + macsecCtlPayloadLen
 	macsecCtlAckWait           = 10 * time.Second
 )
@@ -46,12 +49,13 @@ func deriveMACsecCtlKeys(secret string, nonceHex string) (macsecCtlKeys, error) 
 	return macsecCtlKeys{Nonce: nonceHex, CKN: keys.CKN, Key: key}, nil
 }
 
-func macsecCtlTag(keys macsecCtlKeys, cmd byte, challenge []byte) []byte {
+func macsecCtlTag(keys macsecCtlKeys, cmd byte, challenge []byte, total int) []byte {
 	mac := hmac.New(sha256.New, keys.Key)
 	mac.Write([]byte(macsecCtlMagic))
 	mac.Write([]byte{cmd})
 	mac.Write(keys.CKN)
 	mac.Write(challenge)
+	mac.Write(binary.BigEndian.AppendUint16(nil, uint16(total)))
 	return mac.Sum(nil)
 }
 
@@ -62,7 +66,17 @@ func newMACsecChallenge() ([]byte, error) {
 }
 
 func buildMACsecCtlFrame(dst, src net.HardwareAddr, cmd byte, keys macsecCtlKeys, challenge []byte) []byte {
-	frame := make([]byte, 0, macsecCtlFrameLen)
+	return buildMACsecCtlFrameSized(dst, src, cmd, keys, challenge, macsecCtlFrameLen)
+}
+
+func buildMACsecCtlFrameSized(dst, src net.HardwareAddr, cmd byte, keys macsecCtlKeys, challenge []byte, total int) []byte {
+	if len(dst) != 6 || len(src) != 6 {
+		return nil
+	}
+	if total < macsecCtlFrameLen {
+		total = macsecCtlFrameLen
+	}
+	frame := make([]byte, 0, total)
 	frame = append(frame, dst...)
 	frame = append(frame, src...)
 	frame = binary.BigEndian.AppendUint16(frame, macsecCtlEtherType)
@@ -70,40 +84,57 @@ func buildMACsecCtlFrame(dst, src net.HardwareAddr, cmd byte, keys macsecCtlKeys
 	frame = append(frame, cmd)
 	frame = append(frame, keys.CKN...)
 	frame = append(frame, challenge...)
-	return append(frame, macsecCtlTag(keys, cmd, challenge)...)
+	frame = binary.BigEndian.AppendUint16(frame, uint16(total))
+	frame = append(frame, macsecCtlTag(keys, cmd, challenge, total)...)
+	return append(frame, make([]byte, total-len(frame))...)
 }
 
 func parseMACsecCtlFrame(frame []byte, keys macsecCtlKeys) (cmd byte, src net.HardwareAddr, challenge []byte, ok bool) {
+	cmd, src, challenge, _, ok = parseMACsecCtlFrameSized(frame, keys)
+	return
+}
+
+func parseMACsecCtlFrameSized(frame []byte, keys macsecCtlKeys) (cmd byte, src net.HardwareAddr, challenge []byte, total int, ok bool) {
 	if len(frame) < macsecCtlFrameLen || len(keys.CKN) != macsecCKNLen || len(keys.Key) == 0 {
-		return 0, nil, nil, false
+		return 0, nil, nil, 0, false
 	}
 	if binary.BigEndian.Uint16(frame[12:14]) != macsecCtlEtherType {
-		return 0, nil, nil, false
+		return 0, nil, nil, 0, false
 	}
 	p := frame[14:macsecCtlFrameLen]
 	if string(p[:len(macsecCtlMagic)]) != macsecCtlMagic {
-		return 0, nil, nil, false
+		return 0, nil, nil, 0, false
 	}
 	p = p[len(macsecCtlMagic):]
 	cmd = p[0]
 	ckn := p[1 : 1+macsecCKNLen]
 	challenge = p[1+macsecCKNLen : 1+macsecCKNLen+macsecCtlChallengeLen]
-	tag := p[1+macsecCKNLen+macsecCtlChallengeLen:]
-	if !bytes.Equal(ckn, keys.CKN) {
-		return 0, nil, nil, false
+	total = int(binary.BigEndian.Uint16(p[1+macsecCKNLen+macsecCtlChallengeLen:]))
+	tag := p[1+macsecCKNLen+macsecCtlChallengeLen+2:]
+	if total < macsecCtlFrameLen || len(frame) < total {
+		return 0, nil, nil, 0, false
 	}
-	if !hmac.Equal(tag, macsecCtlTag(keys, cmd, challenge)) {
-		return 0, nil, nil, false
+	if !bytes.Equal(ckn, keys.CKN) {
+		return 0, nil, nil, 0, false
+	}
+	if !hmac.Equal(tag, macsecCtlTag(keys, cmd, challenge, total)) {
+		return 0, nil, nil, 0, false
 	}
 	src = append(net.HardwareAddr{}, frame[6:12]...)
-	return cmd, src, append([]byte{}, challenge...), true
+	return cmd, src, append([]byte{}, challenge...), total, true
 }
 
 const macsecCtlAckWindow = 30 * time.Second
 
+func (m *macsecManager) ctlMAC() net.HardwareAddr {
+	m.ctlMu.Lock()
+	defer m.ctlMu.Unlock()
+	return m.leafCtlMAC
+}
+
 func (m *macsecManager) ctlKeys() *macsecCtlKeys {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.ctlMu.Lock()
+	defer m.ctlMu.Unlock()
 	if m.leafCtl != nil && !m.ctlOffAt.IsZero() && m.now().Sub(m.ctlOffAt) > macsecCtlAckWindow {
 		m.leafCtl = nil
 	}
@@ -132,19 +163,28 @@ func (m *macsecManager) handleLeafCtl(wanif string, frame []byte) bool {
 	if keys == nil {
 		return false
 	}
-	cmd, src, challenge, ok := parseMACsecCtlFrame(frame, *keys)
-	if !ok || cmd != macsecCtlDisable {
+	cmd, src, challenge, total, ok := parseMACsecCtlFrameSized(frame, *keys)
+	if !ok {
 		return false
 	}
-	if info, err := m.sys.LinkInfo(wanif); err == nil {
-		m.sys.SendFrame(wanif, buildMACsecCtlFrame(src, info.MAC, macsecCtlAck, *keys, challenge))
+	if cmd == macsecCtlProbe {
+		if reply := buildMACsecCtlFrameSized(src, m.ctlMAC(), macsecCtlProbeReply, *keys, challenge, total); reply != nil {
+			m.sys.SendFrame(wanif, reply)
+		}
+		return false
 	}
-	m.mu.Lock()
+	if cmd != macsecCtlDisable {
+		return false
+	}
+	if ack := buildMACsecCtlFrame(src, m.ctlMAC(), macsecCtlAck, *keys, challenge); ack != nil {
+		m.sys.SendFrame(wanif, ack)
+	}
+	m.ctlMu.Lock()
 	first := m.ctlOffAt.IsZero()
 	if first {
 		m.ctlOffAt = m.now()
 	}
-	m.mu.Unlock()
+	m.ctlMu.Unlock()
 	if !first {
 		return true
 	}
@@ -198,4 +238,69 @@ func (m *macsecManager) disableOverWire(leaf LeafRouter) (bool, error) {
 		return ok && cmd == macsecCtlAck && bytes.Equal(echoed, challenge)
 	})
 	return true, err
+}
+
+func (m *macsecManager) probeFrame(parent string, keys macsecCtlKeys, src, dst net.HardwareAddr, size int) (net.HardwareAddr, bool) {
+	challenge, err := newMACsecChallenge()
+	if err != nil {
+		return nil, false
+	}
+	total := 14 + size
+	frame := buildMACsecCtlFrameSized(dst, src, macsecCtlProbe, keys, challenge, total)
+	var from net.HardwareAddr
+	for attempt := 0; attempt < 2; attempt++ {
+		err := m.sys.Exchange(parent, frame, macsecProbeWait, func(reply []byte) bool {
+			cmd, s, echoed, t, ok := parseMACsecCtlFrameSized(reply, keys)
+			if ok && cmd == macsecCtlProbeReply && t == total && bytes.Equal(echoed, challenge) {
+				from = s
+				return true
+			}
+			return false
+		})
+		if err == nil {
+			return from, true
+		}
+	}
+	return nil, false
+}
+
+var errMTUProbeNoReply = errors.New("mesh node did not answer the MTU test")
+
+func (m *macsecManager) testUnderlayMTU(leaf LeafRouter) (int, error) {
+	if leaf.MACsec == nil || !leaf.MACsec.Enabled {
+		return 0, errors.New("encryption is not enabled for this mesh node")
+	}
+	keys, err := deriveMACsecCtlKeys(leaf.APIToken, leaf.MACsec.KeyNonce)
+	if err != nil {
+		return 0, err
+	}
+	info, err := m.sys.LinkInfo(leaf.MACsec.Parent)
+	if err != nil {
+		return 0, err
+	}
+	broadcast := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	nodeMAC, ok := m.probeFrame(leaf.MACsec.Parent, keys, info.MAC, broadcast, macsecEthernetMTU)
+	if !ok {
+		return 0, errMTUProbeNoReply
+	}
+	max := info.MTU
+	if max > meshJumboMTU {
+		max = meshJumboMTU
+	}
+	if max <= macsecEthernetMTU {
+		return macsecEthernetMTU, nil
+	}
+	if _, ok := m.probeFrame(leaf.MACsec.Parent, keys, info.MAC, nodeMAC, max); ok {
+		return max, nil
+	}
+	lo, hi := macsecEthernetMTU, max
+	for hi-lo > 8 {
+		mid := (lo + hi) / 2
+		if _, ok := m.probeFrame(leaf.MACsec.Parent, keys, info.MAC, nodeMAC, mid); ok {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return lo, nil
 }

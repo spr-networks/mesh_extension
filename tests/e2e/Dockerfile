@@ -3,7 +3,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       linux-image-generic linux-modules-extra-$(apt-cache depends linux-image-generic | grep -o 'linux-image-[0-9][^ ]*' | head -1 | sed 's/linux-image-//') \
       qemu-system-arm virtme-ng busybox-static kmod binutils zstd udev \
-      wpasupplicant iproute2 nftables tcpdump iputils-ping python3 curl openssl procps \
+      wpasupplicant wireguard-tools iproute2 nftables tcpdump iputils-ping python3 curl openssl procps \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 - <<'PY'
 p = "/usr/lib/python3/dist-packages/virtme/architectures.py"

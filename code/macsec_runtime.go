@@ -47,10 +47,15 @@ type macsecSys interface {
 	DisableIPv6(name string) error
 	NFT(ruleset string) error
 	NFTDeleteTable(family, table string) error
+	NFTList(family, table string) (string, error)
 	StartMKA(parent, confPath string) (mkaProc, error)
 	Probe() error
 	Routes(dev string) ([]routeEntry, error)
+	Cmd(name string, args ...string) error
+	Output(name string, args ...string) ([]byte, error)
+	ProbeWG() error
 	SendFrame(dev string, frame []byte) error
+	Exchange(dev string, frame []byte, timeout time.Duration, handle func([]byte) bool) error
 	RecvFrames(dev string, timeout time.Duration, handle func([]byte) bool) error
 	PinRouteMTU(dev string, route routeEntry, mtu int) error
 }
@@ -73,6 +78,8 @@ type MACsecLinkStatus struct {
 	Port      int
 	LeafMAC   string `json:",omitempty"`
 	LinkMTU   int
+	Mode      string `json:",omitempty"`
+	Underlay  int    `json:",omitempty"`
 	Running   bool
 	Secured   bool
 	Pending   bool   `json:",omitempty"`
@@ -107,29 +114,41 @@ type macsecManager struct {
 	origMTU    map[string]int
 	mtuInUse   map[string]bool
 	noEgress   bool
+	guardRules string
+	guardLive  string
 	mssMTU     int
 	ready      bool
 	mtuLoaded  bool
 	unsecured  map[string]time.Time
 	restarted  map[string]time.Time
+	ctlMu      sync.Mutex
 	leafCtl    *macsecCtlKeys
+	leafCtlMAC net.HardwareAddr
 	ctlOffAt   time.Time
 	ctlRunning bool
 	noCtlLoop  bool
+	wgApplied  map[string]string
+	wgParents  map[string]bool
+	wgMainMTU  int
+	mtuTesting map[string]bool
+	wgSeen     bool
 	kick       chan struct{}
 }
 
 func newMACsecManager(sys macsecSys) *macsecManager {
 	return &macsecManager{
-		sys:       sys,
-		now:       time.Now,
-		isLeaf:    isLeafRouter,
-		procs:     map[string]*mkaRunning{},
-		origMTU:   map[string]int{},
-		unsecured: map[string]time.Time{},
-		restarted: map[string]time.Time{},
-		mtuInUse:  map[string]bool{},
-		kick:      make(chan struct{}, 1),
+		sys:        sys,
+		now:        time.Now,
+		isLeaf:     isLeafRouter,
+		procs:      map[string]*mkaRunning{},
+		origMTU:    map[string]int{},
+		unsecured:  map[string]time.Time{},
+		restarted:  map[string]time.Time{},
+		wgApplied:  map[string]string{},
+		wgParents:  map[string]bool{},
+		mtuTesting: map[string]bool{},
+		mtuInUse:   map[string]bool{},
+		kick:       make(chan struct{}, 1),
 	}
 }
 
@@ -350,11 +369,14 @@ func parentCapableMTU(info linkInfo) int {
 }
 
 func (m *macsecManager) raiseParentMTU(parent string, info linkInfo) linkInfo {
+	return m.raiseParentMTUTo(parent, info, macsecWantParent)
+}
+
+func (m *macsecManager) raiseParentMTUTo(parent string, info linkInfo, target int) linkInfo {
 	m.mtuInUse[parent] = true
-	if info.MTU >= macsecWantParent {
+	if info.MTU >= target {
 		return info
 	}
-	target := macsecWantParent
 	if info.MaxMTU > 0 && info.MaxMTU < target {
 		target = info.MaxMTU
 	}
@@ -432,6 +454,9 @@ func (m *macsecManager) pinPlaintextRoutes(parent string, info linkInfo) {
 		if route.MTU != 0 && route.MTU <= orig {
 			continue
 		}
+		if isMeshUnderlayRoute(route.Dst) {
+			continue
+		}
 		if err := m.sys.PinRouteMTU(parent, route, orig); err != nil {
 			fmt.Println("[-] macsec: could not pin route MTU on", parent, route.Dst, err)
 		}
@@ -462,6 +487,10 @@ func (m *macsecManager) restartIfStuck(id string, secured bool) {
 }
 
 func (m *macsecManager) noPeerError(id string, parent string, secured bool) string {
+	return m.noPeerErrorFor(backhaulLabel(backhaulMACsec), id, parent, secured)
+}
+
+func (m *macsecManager) noPeerErrorFor(label string, id string, parent string, secured bool) string {
 	if secured {
 		delete(m.unsecured, id)
 		return ""
@@ -474,7 +503,7 @@ func (m *macsecManager) noPeerError(id string, parent string, secured bool) stri
 	if m.now().Sub(since) < macsecNoPeerAfter {
 		return ""
 	}
-	return fmt.Sprintf("MACsec link not up on %s", parent)
+	return fmt.Sprintf("%s not up on %s", label, parent)
 }
 
 func (m *macsecManager) applyLinkMTU(link macsecLink, linkMTU int, parent linkInfo) {
@@ -513,6 +542,17 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 
 	desired := map[string]bool{}
 	pinned := map[string]bool{}
+	wgPeers := map[string]bool{}
+	wgVX := map[string]bool{}
+	m.wgMainMTU = 0
+	for _, leaf := range config.LeafRouters {
+		if leaf.MACsec != nil && leaf.MACsec.Enabled && storedMode(leaf.MACsec.Mode) == backhaulWireGuard {
+			mtu := underlayOrDefault(leaf.MACsec.UnderlayMTU) - meshWGOverhead
+			if m.wgMainMTU == 0 || mtu < m.wgMainMTU {
+				m.wgMainMTU = mtu
+			}
+		}
+	}
 	status := MACsecStatus{Role: "main", Links: []MACsecLinkStatus{}}
 	enabled := 0
 	var links []macsecLink
@@ -538,6 +578,34 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 			Port:    cfg.Port,
 			LeafMAC: cfg.LeafMAC,
 			LinkMTU: cfg.LinkMTU,
+			Mode:    storedMode(cfg.Mode),
+		}
+		if st.Mode == backhaulWireGuard {
+			st.Underlay = cfg.UnderlayMTU
+			info, err := m.sys.LinkInfo(cfg.Parent)
+			if err != nil {
+				st.Error = "parent interface unavailable"
+				status.Links = append(status.Links, st)
+				continue
+			}
+			info = m.raiseParentMTUTo(cfg.Parent, info, meshJumboMTU)
+			if !pinned[cfg.Parent] {
+				pinned[cfg.Parent] = true
+				m.pinPlaintextRoutes(cfg.Parent, info)
+			}
+			wgPeers[cfg.LeafPublicKey] = true
+			wgVX[meshVXLANMain(cfg.Port)] = true
+			if err := m.mainWGLeaf(leaf, info, &st); err != nil {
+				st.Error = err.Error()
+			} else {
+				st.Running = true
+			}
+			if msg := m.noPeerErrorFor(backhaulLabel(backhaulWireGuard), fmt.Sprintf("wg-%d", cfg.Port), cfg.Parent, st.Secured); msg != "" && st.Error == "" {
+				st.Error = msg
+			}
+			m.maybeTestMTU(leaf, st.Secured)
+			status.Links = append(status.Links, st)
+			continue
 		}
 		keys, err := deriveMACsecKeys(leaf.APIToken, cfg.KeyNonce)
 		if err != nil {
@@ -594,8 +662,27 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 	}
 
 	m.stopAllMKA(desired)
+	if len(wgPeers) > 0 || m.wgSeen {
+		m.cleanupMainWG(wgPeers, wgVX)
+		m.wgSeen = len(wgPeers) > 0
+	}
 	status.Strict = len(config.LeafRouters) > 0 && enabled == len(config.LeafRouters)
 	m.status = status
+}
+
+func (m *macsecManager) installGuard(ruleset string) error {
+	if ruleset == m.guardRules {
+		if live, err := m.sys.NFTList("netdev", macsecGuardTable); err == nil && live == m.guardLive {
+			return nil
+		}
+	}
+	if err := m.sys.NFT(ruleset); err != nil {
+		m.guardRules = ""
+		return err
+	}
+	m.guardRules = ruleset
+	m.guardLive, _ = m.sys.NFTList("netdev", macsecGuardTable)
+	return nil
 }
 
 func (m *macsecManager) applyGuard(wanif string) error {
@@ -604,7 +691,7 @@ func (m *macsecManager) applyGuard(wanif string) error {
 		if err != nil {
 			return err
 		}
-		if err := m.sys.NFT(ruleset); err == nil {
+		if err := m.installGuard(ruleset); err == nil {
 			return nil
 		}
 		m.noEgress = true
@@ -614,7 +701,7 @@ func (m *macsecManager) applyGuard(wanif string) error {
 	if err != nil {
 		return err
 	}
-	return m.sys.NFT(ruleset)
+	return m.installGuard(ruleset)
 }
 
 func (m *macsecManager) applyMSSClamp(linkMTU int) {
@@ -640,9 +727,11 @@ func (m *macsecManager) reconcileLeaf(config MeshConfig) {
 	cfg := config.LeafMACsec
 	wanif := meshWANIF()
 	if !cfg.Enabled {
+		m.ctlMu.Lock()
 		if m.ctlOffAt.IsZero() {
 			m.leafCtl = nil
 		}
+		m.ctlMu.Unlock()
 		if m.leafActive || macsecRequiredFlagSet() || len(m.procs) > 0 {
 			m.teardownLeaf(wanif)
 		}
@@ -679,8 +768,15 @@ func (m *macsecManager) reconcileLeaf(config MeshConfig) {
 		return
 	}
 
-	if err := m.applyGuard(wanif); err != nil {
-		st.Error = "guard: " + err.Error()
+	wg := storedMode(cfg.Mode) == backhaulWireGuard
+	var guardErr error
+	if wg {
+		guardErr = m.applyGuardWG(wanif, cfg.Port)
+	} else {
+		guardErr = m.applyGuard(wanif)
+	}
+	if guardErr != nil {
+		st.Error = "guard: " + guardErr.Error()
 	}
 
 	info, err := m.sys.LinkInfo(wanif)
@@ -696,7 +792,11 @@ func (m *macsecManager) reconcileLeaf(config MeshConfig) {
 	}
 	m.sys.DisableIPv6(wanif)
 	m.sys.SetUp(wanif)
-	info = m.raiseParentMTU(wanif, info)
+	if wg {
+		info = m.raiseParentMTUTo(wanif, info, meshJumboMTU)
+	} else {
+		info = m.raiseParentMTU(wanif, info)
+	}
 
 	token, err := getToken(DOWNHAUL_TOKEN_NAME)
 	if err != nil {
@@ -709,12 +809,47 @@ func (m *macsecManager) reconcileLeaf(config MeshConfig) {
 		return
 	}
 	if ctl, err := deriveMACsecCtlKeys(token.Token, cfg.KeyNonce); err == nil {
+		m.ctlMu.Lock()
 		m.leafCtl = &ctl
+		m.leafCtlMAC = info.MAC
 		m.ctlOffAt = time.Time{}
-		if !m.ctlRunning && !m.noCtlLoop {
+		start := !m.ctlRunning && !m.noCtlLoop
+		if start {
 			m.ctlRunning = true
+		}
+		m.ctlMu.Unlock()
+		if start {
 			go m.ctlListen(wanif)
 		}
+	}
+	if wg {
+		st.Mode = backhaulWireGuard
+		st.Port = cfg.Port
+		st.Underlay = cfg.UnderlayMTU
+		m.stopAllMKA(nil)
+		if links, err := m.sys.Links(); err == nil {
+			for _, link := range links {
+				if link.Parent == wanif {
+					m.sys.DeleteLink(link.Name)
+				}
+			}
+		}
+		ok, err := m.leafWG(cfg, wanif, token.Token, &st)
+		if err != nil {
+			st.Error = err.Error()
+		} else {
+			st.Running = true
+		}
+		secured = ok
+		st.Secured = secured
+		if msg := m.noPeerErrorFor(backhaulLabel(backhaulWireGuard), "leaf-wg", wanif, secured); msg != "" && st.Error == "" {
+			st.Error = msg
+		}
+		m.applyMSSClamp(cfg.LinkMTU)
+		return
+	}
+	if m.linkExists(meshWGIface) {
+		m.teardownWG(wanif)
 	}
 	inst := mkaInstance{ID: "leaf", Parent: wanif, Port: macsecLeafPort, Priority: macsecPrioLeaf, Keys: keys}
 	running, err := m.ensureMKA(inst, info.MAC)
@@ -809,7 +944,10 @@ func (m *macsecManager) teardownLeaf(wanif string) {
 			}
 		}
 	}
+	m.teardownWG(wanif)
 	m.sys.NFTDeleteTable("netdev", macsecGuardTable)
+	m.guardRules = ""
+	m.guardLive = ""
 	m.sys.NFTDeleteTable("bridge", macsecMSSTable)
 	m.mssMTU = 0
 	delete(m.mtuInUse, wanif)
@@ -864,9 +1002,13 @@ func parseLinkInfo(data []byte) (linkInfo, error) {
 	if len(entries) != 1 {
 		return linkInfo{}, errors.New("interface not found")
 	}
-	mac, err := net.ParseMAC(entries[0].Address)
-	if err != nil {
-		return linkInfo{}, err
+	var mac net.HardwareAddr
+	if entries[0].Address != "" {
+		parsed, err := net.ParseMAC(entries[0].Address)
+		if err != nil {
+			return linkInfo{}, err
+		}
+		mac = parsed
 	}
 	return linkInfo{MAC: mac, MTU: entries[0].MTU, MaxMTU: entries[0].MaxMTU, Master: entries[0].Master}, nil
 }
@@ -957,14 +1099,29 @@ func (execMACsecSys) NFT(ruleset string) error {
 	return nil
 }
 
-func (execMACsecSys) NFTDeleteTable(family, table string) error {
+func checkNFTTable(family, table string) error {
 	if family != "netdev" && family != "bridge" {
 		return errors.New("unexpected nft family")
 	}
 	if table != macsecGuardTable && table != macsecMSSTable {
 		return errors.New("unexpected nft table")
 	}
+	return nil
+}
+
+func (execMACsecSys) NFTDeleteTable(family, table string) error {
+	if err := checkNFTTable(family, table); err != nil {
+		return err
+	}
 	return exec.Command("nft", "delete", "table", family, table).Run()
+}
+
+func (execMACsecSys) NFTList(family, table string) (string, error) {
+	if err := checkNFTTable(family, table); err != nil {
+		return "", err
+	}
+	out, err := exec.Command("nft", "list", "table", family, table).Output()
+	return string(out), err
 }
 
 type execMKAProc struct {
@@ -1111,6 +1268,13 @@ func (execMACsecSys) SendFrame(dev string, frame []byte) error {
 		return err
 	}
 	return sendRawFrame(dev, frame)
+}
+
+func (execMACsecSys) Exchange(dev string, frame []byte, timeout time.Duration, handle func([]byte) bool) error {
+	if err := checkIfname(dev); err != nil {
+		return err
+	}
+	return exchangeRawFrame(dev, frame, timeout, handle)
 }
 
 func (execMACsecSys) RecvFrames(dev string, timeout time.Duration, handle func([]byte) bool) error {

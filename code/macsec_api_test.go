@@ -144,14 +144,14 @@ func stubLeaf(t *testing.T, reply macsecPeerResponse, err error) *[]leafCall {
 	return calls
 }
 
-var goodLeafReply = macsecPeerResponse{Version: macsecProtocolVersion, BridgeMAC: "00:11:22:33:44:55", MaxMTU: 1500, LinkMTU: 1500}
+var goodLeafReply = macsecPeerResponse{Version: macsecProtocolVersion, BridgeMAC: "00:11:22:33:44:55", MaxMTU: 1500, LinkMTU: 1500, LeafPublicKey: "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="}
 
 func TestLeafRouterMACsecEnable(t *testing.T) {
 	setupMACsecEnv(t, false)
 	writeMeshConfig(t, mainConfigWithLeaves(2, 0))
 	calls := stubLeaf(t, goodLeafReply, nil)
 
-	rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true})
+	rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true, Mode: "macsec"})
 	if rec.Code != 200 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
@@ -174,13 +174,13 @@ func TestLeafRouterMACsecEnable(t *testing.T) {
 		t.Fatal("response leaks key material")
 	}
 
-	doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.11", Enable: true})
+	doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.11", Enable: true, Mode: "macsec"})
 	second := readMeshConfig().LeafRouters[1].MACsec
 	if second == nil || second.Port != 3 || second.KeyNonce == m.KeyNonce {
 		t.Fatalf("second leaf %+v", second)
 	}
 
-	doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true})
+	doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true, Mode: "macsec"})
 	if again := readMeshConfig().LeafRouters[0].MACsec; again.KeyNonce != m.KeyNonce || again.Port != m.Port {
 		t.Fatalf("re-enable rotated keys: %+v", again)
 	}
@@ -191,11 +191,11 @@ func TestLeafRouterMACsecMTUCap(t *testing.T) {
 	writeMeshConfig(t, mainConfigWithLeaves(1, 0))
 	calls := stubLeaf(t, macsecPeerResponse{Version: macsecProtocolVersion, BridgeMAC: "00:11:22:33:44:55", MaxMTU: 1500}, nil)
 	for _, bad := range []int{1279, 1501, -1} {
-		if rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true, MTU: bad}); rec.Code != 400 {
+		if rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true, MTU: bad, Mode: "macsec"}); rec.Code != 400 {
 			t.Errorf("MTU %d accepted", bad)
 		}
 	}
-	rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true, MTU: 1468})
+	rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true, MTU: 1468, Mode: "macsec"})
 	if rec.Code != 200 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
@@ -257,9 +257,15 @@ func TestLeafRouterMACsecValidation(t *testing.T) {
 	}
 
 	env.sys.probeErr = errors.New("no module")
-	if rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true}); rec.Code != 400 {
+	if rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true, Mode: "macsec"}); rec.Code != 400 {
 		t.Fatalf("enabled without kernel support: %d", rec.Code)
 	}
+	env.sys.probeErr = nil
+	env.sys.probeWGErr = errors.New("no wireguard")
+	if rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: true}); rec.Code != 400 || !strings.Contains(rec.Body.String(), "Encrypted Link (WireGuard) unsupported on this router") {
+		t.Fatalf("enabled WireGuard without kernel support: %d %s", rec.Code, rec.Body)
+	}
+	env.sys.probeWGErr = nil
 
 	setLeafRouter(true)
 	env.sys.probeErr = nil
@@ -275,7 +281,7 @@ func TestLeafRouterMACsecDisable(t *testing.T) {
 	stubLeaf(t, macsecPeerResponse{}, errors.New("unreachable"))
 	env.sys.sendErr = errors.New("no socket")
 	rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: "192.168.2.10", Enable: false})
-	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "MACsec is off on this router and did not get confirmation from node. Check mesh node at 192.168.2.10") {
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "Encrypted Link (MACsec) is off on this router and did not get confirmation from node. Check mesh node at 192.168.2.10") {
 		t.Fatalf("unconfirmed disable not reported: %d %s", rec.Code, rec.Body)
 	}
 	if readMeshConfig().LeafRouters[0].MACsec != nil {
@@ -324,7 +330,7 @@ func TestPendingMACsecCompletesWhenLeafReturns(t *testing.T) {
 	config.LeafRouters[0].MACsecPending = true
 	writeMeshConfig(t, config)
 
-	stubLeaf(t, macsecPeerResponse{}, errors.New("leaf 192.168.2.10 refused MACsec change: 400 mesh bridge unavailable"))
+	stubLeaf(t, macsecPeerResponse{}, errors.New("leaf 192.168.2.10 refused Encrypted Link (MACsec) change: 400 mesh bridge unavailable"))
 	retryPendingMACsec()
 	if got := readMeshConfig().LeafRouters[0]; !got.MACsecPending || got.MACsec != nil {
 		t.Fatalf("pending request lost on failure: %+v", got)

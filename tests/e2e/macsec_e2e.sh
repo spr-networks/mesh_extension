@@ -130,7 +130,7 @@ capture_stop
   && pass "baseline: wire tap sees plaintext station traffic before MACsec" \
   || die "wire tap sees nothing; the capture position is broken"
 
-ENABLE=$(api $M PUT /leafRouter/macsec '{"IP":"10.88.0.2","Enable":true}') || die "enable handshake failed: $ENABLE"
+ENABLE=$(api $M PUT /leafRouter/macsec '{"IP":"10.88.0.2","Enable":true,"Mode":"macsec"}') || die "enable handshake failed: $ENABLE"
 pass "main enabled MACsec through the TLS handshake with the leaf"
 
 wait_for 180 leaf_secured || die "leaf never secured"
@@ -255,7 +255,7 @@ wait_for 60 sh -c "ip -n leaf -o link show master br0 | grep -q ' eth0'" \
   || fail "node stayed on MACsec after the main router turned it off with the link down"
 ip -n sw link set sw0 type bridge group_fwd_mask 8
 
-ENABLE=$(api $M PUT /leafRouter/macsec '{"IP":"10.88.0.2","Enable":true}') || fail "re-enable after wire disable failed: $ENABLE"
+ENABLE=$(api $M PUT /leafRouter/macsec '{"IP":"10.88.0.2","Enable":true,"Mode":"macsec"}') || fail "re-enable after wire disable failed: $ENABLE"
 wait_for 180 leaf_secured && wait_for 60 main_secured || fail "link did not secure again"
 MAIN_SECY=$(status_field $M Interface)
 nsx main ip addr del 10.88.0.1/24 dev eth1 2>/dev/null
@@ -270,7 +270,7 @@ wait_for 60 sh -c "ip -n leaf -o link show master br0 | grep -q ' eth0'" \
   && [ "$(mtu leaf eth0)" = 1500 ] \
   && pass "disable over the encrypted link returns the leaf to the plaintext uplink" || fail "disable did not restore the plaintext uplink"
 
-ENABLE=$(api $M PUT /leafRouter/macsec '{"IP":"10.88.0.2","Enable":true}') || fail "re-enable failed: $ENABLE"
+ENABLE=$(api $M PUT /leafRouter/macsec '{"IP":"10.88.0.2","Enable":true,"Mode":"macsec"}') || fail "re-enable failed: $ENABLE"
 wait_for 180 leaf_secured || fail "re-enabled link never secured"
 api $L PUT /leafMode/disable >/dev/null || fail "leaf mode reset failed"
 wait_for 30 sh -c "[ ! -f $L/configs/base/mesh_macsec_required ] && ! ip -n leaf -d link show type macsec | grep -q macsec" \

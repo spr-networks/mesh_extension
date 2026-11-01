@@ -33,6 +33,10 @@ func TestMACsecCtlFrameRoundTrip(t *testing.T) {
 		t.Fatalf("round trip failed: %v %v %x %v", cmd, src, echoed, ok)
 	}
 
+	if buildMACsecCtlFrame(dst, nil, macsecCtlDisable, keys, challenge) != nil || buildMACsecCtlFrame(dst[:4], testMainMAC, macsecCtlDisable, keys, challenge) != nil {
+		t.Fatal("frame built without a 6 byte address")
+	}
+
 	cak := mustKeys(t, testPairingToken, testNonce).CAK
 	if bytes.Equal(keys.Key, cak) {
 		t.Fatal("control key reuses the CAK")
@@ -161,7 +165,7 @@ func TestMainWireDisableWithoutAckStillTurnsMainOff(t *testing.T) {
 	stubLeaf(t, macsecPeerResponse{}, errors.New("unreachable"))
 
 	rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: config.LeafRouters[0].IP, Enable: false})
-	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "MACsec is off on this router and did not get confirmation from node. Check mesh node at "+config.LeafRouters[0].IP) {
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "Encrypted Link (MACsec) is off on this router and did not get confirmation from node. Check mesh node at "+config.LeafRouters[0].IP) {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	if readMeshConfig().LeafRouters[0].MACsec != nil {
@@ -169,6 +173,22 @@ func TestMainWireDisableWithoutAckStillTurnsMainOff(t *testing.T) {
 	}
 	if len(env.sys.frames) == 0 {
 		t.Fatal("no disable frame sent")
+	}
+}
+
+func TestMainWireDisableWithoutAckNamesWireGuard(t *testing.T) {
+	setupMACsecEnv(t, false)
+	config := mainConfigWithLeaves(1, 1)
+	config.LeafRouters[0].MACsec.Mode = backhaulWireGuard
+	writeMeshConfig(t, config)
+	stubLeaf(t, macsecPeerResponse{}, errors.New("unreachable"))
+
+	rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: config.LeafRouters[0].IP, Enable: false})
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "Encrypted Link (WireGuard) is off on this router and did not get confirmation from node. Check mesh node at "+config.LeafRouters[0].IP) {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if readMeshConfig().LeafRouters[0].MACsec != nil {
+		t.Fatal("main router kept WireGuard after it was turned off")
 	}
 }
 
@@ -180,7 +200,7 @@ func TestMainWireDisableSendFailure(t *testing.T) {
 	env.sys.sendErr = errors.New("no socket")
 
 	rec := doJSON(t, leafRouterMACsec, http.MethodPut, leafMACsecRequest{IP: config.LeafRouters[0].IP, Enable: false})
-	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "MACsec is off on this router and did not get confirmation from node. Check mesh node at "+config.LeafRouters[0].IP) {
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "Encrypted Link (MACsec) is off on this router and did not get confirmation from node. Check mesh node at "+config.LeafRouters[0].IP) {
 		t.Fatalf("unconfirmed disable not reported: %d %s", rec.Code, rec.Body)
 	}
 	if readMeshConfig().LeafRouters[0].MACsec != nil {

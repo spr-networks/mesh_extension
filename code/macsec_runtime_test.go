@@ -38,22 +38,27 @@ func (p *fakeProc) Stop() {
 }
 
 type fakeSys struct {
-	mu        sync.Mutex
-	ops       []string
-	links     []macsecLink
-	infos     map[string]linkInfo
-	route     string
-	probeErr  error
-	egressErr bool
-	nftErr    error
-	confs     map[string]string
-	routes    map[string][]routeEntry
-	frames    [][]byte
-	inbox     [][]byte
-	reply     func(frame []byte) []byte
-	sendErr   error
-	procs     []*fakeProc
-	nextIndex int
+	mu         sync.Mutex
+	ops        []string
+	links      []macsecLink
+	infos      map[string]linkInfo
+	route      string
+	probeErr   error
+	egressErr  bool
+	nftErr     error
+	confs      map[string]string
+	routes     map[string][]routeEntry
+	frames     [][]byte
+	inbox      [][]byte
+	reply      func(frame []byte) []byte
+	sendErr    error
+	probeWGErr error
+	handshakes map[string]int64
+	wgPeers    map[string]bool
+	addrs      map[string][]string
+	tables     map[string]string
+	procs      []*fakeProc
+	nextIndex  int
 }
 
 func newFakeSys() *fakeSys {
@@ -159,6 +164,7 @@ func (f *fakeSys) DeleteLink(name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.op("del %s", name)
+	delete(f.infos, name)
 	kept := f.links[:0]
 	for _, l := range f.links {
 		if l.Name != name {
@@ -186,7 +192,19 @@ func (f *fakeSys) NFT(ruleset string) error {
 		f.op("nft-fail egress")
 		return errors.New("egress unsupported")
 	}
+	if f.tables == nil {
+		f.tables = map[string]string{}
+	}
+	for _, table := range []string{macsecGuardTable, macsecMSSTable} {
+		if strings.Contains(ruleset, table) {
+			f.tables[table] = ruleset
+		}
+	}
 	switch {
+	case strings.Contains(ruleset, macsecGuardTable) && strings.Contains(ruleset, "udp sport 51821") && strings.Contains(ruleset, "hook egress"):
+		f.op("nft guard-wg+egress")
+	case strings.Contains(ruleset, macsecGuardTable) && strings.Contains(ruleset, "udp sport 51821"):
+		f.op("nft guard-wg")
 	case strings.Contains(ruleset, macsecGuardTable) && strings.Contains(ruleset, "hook egress"):
 		f.op("nft guard+egress")
 	case strings.Contains(ruleset, macsecGuardTable):
@@ -203,7 +221,18 @@ func (f *fakeSys) NFTDeleteTable(family, table string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.op("nft-del %s %s", family, table)
+	delete(f.tables, table)
 	return nil
+}
+
+func (f *fakeSys) NFTList(family, table string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	live, ok := f.tables[table]
+	if !ok {
+		return "", errors.New("no such table")
+	}
+	return live, nil
 }
 
 var fakePortRE = regexp.MustCompile(`macsec_port=(\d+)`)
@@ -233,6 +262,89 @@ func (f *fakeSys) StartMKA(parent, confPath string) (mkaProc, error) {
 }
 
 func (f *fakeSys) Probe() error { return f.probeErr }
+
+func (f *fakeSys) ProbeWG() error { return f.probeWGErr }
+
+func (f *fakeSys) Cmd(name string, args ...string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.op("cmd %s %s", name, strings.Join(args, " "))
+	if name == "ip" && len(args) >= 3 && args[0] == "link" && args[1] == "add" {
+		mac, _ := net.ParseMAC(fmt.Sprintf("02:00:00:00:%02x:%02x", len(f.infos), f.nextIndex))
+		mtu := 1500
+		if len(args) >= 5 && args[4] == "wireguard" {
+			mtu = 1420
+		}
+		f.infos[args[2]] = linkInfo{MAC: mac, MTU: mtu, MaxMTU: 65535}
+	}
+	if name == "ip" && len(args) >= 5 && args[0] == "addr" && args[1] == "replace" {
+		if f.addrs == nil {
+			f.addrs = map[string][]string{}
+		}
+		f.addrs[args[4]] = append(f.addrs[args[4]], args[2])
+	}
+	if name == "wg" && len(args) >= 4 && args[0] == "set" && args[2] == "peer" {
+		if f.wgPeers == nil {
+			f.wgPeers = map[string]bool{}
+		}
+		if len(args) >= 5 && args[4] == "remove" {
+			delete(f.wgPeers, args[3])
+		} else {
+			f.wgPeers[args[3]] = true
+		}
+	}
+	return nil
+}
+
+func (f *fakeSys) Output(name string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	joined := name + " " + strings.Join(args, " ")
+	switch {
+	case joined == "wg show wgmesh latest-handshakes":
+		if _, ok := f.infos[meshWGIface]; !ok {
+			return nil, errors.New("no device")
+		}
+		var b strings.Builder
+		for pub, ts := range f.handshakes {
+			fmt.Fprintf(&b, "%s\t%d\n", pub, ts)
+		}
+		return []byte(b.String()), nil
+	case joined == "wg show wgmesh peers":
+		if _, ok := f.infos[meshWGIface]; !ok {
+			return nil, errors.New("no device")
+		}
+		var b strings.Builder
+		for pub := range f.wgPeers {
+			fmt.Fprintf(&b, "%s\n", pub)
+		}
+		return []byte(b.String()), nil
+	case joined == "ip -o link show type vxlan":
+		var b strings.Builder
+		i := 10
+		for name := range f.infos {
+			if strings.HasPrefix(name, meshVXLANPrefix) {
+				fmt.Fprintf(&b, "%d: %s: <BROADCAST,MULTICAST> mtu 1500\n", i, name)
+				i++
+			}
+		}
+		return []byte(b.String()), nil
+	case len(args) == 6 && name == "ip" && args[0] == "-4" && args[1] == "-o" && args[2] == "addr":
+		var b strings.Builder
+		for _, a := range f.addrs[args[5]] {
+			fmt.Fprintf(&b, "2: %s    inet %s scope global %s\n", args[5], a, args[5])
+		}
+		return []byte(b.String()), nil
+	}
+	return nil, errors.New("unexpected output command: " + joined)
+}
+
+func (f *fakeSys) Exchange(dev string, frame []byte, timeout time.Duration, handle func([]byte) bool) error {
+	if err := f.SendFrame(dev, frame); err != nil {
+		return err
+	}
+	return f.RecvFrames(dev, timeout, handle)
+}
 
 func (f *fakeSys) SendFrame(dev string, frame []byte) error {
 	f.mu.Lock()
@@ -334,7 +446,7 @@ type macsecTestEnv struct {
 func setupMACsecEnv(t *testing.T, leaf bool) *macsecTestEnv {
 	t.Helper()
 	dir := t.TempDir()
-	saved := []*string{&MeshConfigFile, &AuthTokensFile, &MESH_ENABLED_LEAF_PATH, &macsecRunDir, &macsecRequiredFlagPath, &meshBaseConfigPath, &macsecMTUStatePath}
+	saved := []*string{&MeshConfigFile, &AuthTokensFile, &MESH_ENABLED_LEAF_PATH, &macsecRunDir, &macsecRequiredFlagPath, &meshBaseConfigPath, &macsecMTUStatePath, &meshWGKeyPath}
 	old := make([]string, len(saved))
 	for i, p := range saved {
 		old[i] = *p
@@ -358,6 +470,7 @@ func setupMACsecEnv(t *testing.T, leaf bool) *macsecTestEnv {
 	macsecRequiredFlagPath = filepath.Join(dir, "macsec_required")
 	meshBaseConfigPath = filepath.Join(dir, "config.sh")
 	macsecMTUStatePath = filepath.Join(dir, "macsec_mtu.json")
+	meshWGKeyPath = filepath.Join(dir, "wg_private.key")
 	t.Setenv("WANIF", "eth0")
 
 	tokens, _ := json.Marshal([]Token{{Name: DOWNHAUL_TOKEN_NAME, Token: testPairingToken}})
@@ -825,6 +938,13 @@ func TestParseLinkInfoAndRoute(t *testing.T) {
 	if _, err := parseLinkInfo([]byte(`[]`)); err == nil {
 		t.Error("missing interface accepted")
 	}
+	wg, err := parseLinkInfo([]byte(`[{"ifindex":7,"ifname":"wgmesh","flags":["POINTOPOINT","NOARP","UP","LOWER_UP"],"mtu":8940,"link_type":"none","min_mtu":0,"max_mtu":2147483552,"linkinfo":{"info_kind":"wireguard"}}]`))
+	if err != nil || wg.MTU != 8940 || wg.MAC != nil {
+		t.Fatalf("wireguard link: %+v %v", wg, err)
+	}
+	if _, err := parseLinkInfo([]byte(`[{"ifname":"eth0","mtu":1500,"address":"zz:11"}]`)); err == nil {
+		t.Error("malformed address accepted")
+	}
 	dev, err := parseRouteDev([]byte(`[{"dst":"192.168.2.10","dev":"eth1","prefsrc":"192.168.2.1"}]`))
 	if err != nil || dev != "eth1" {
 		t.Fatalf("%q %v", dev, err)
@@ -862,6 +982,38 @@ func TestLeafWaitsForEnableReplyBeforeGuarding(t *testing.T) {
 	env.m.reconcile()
 	if indexOf(env.sys.Ops(), "nft guard") < 0 {
 		t.Fatal("leaf never applied MACsec")
+	}
+}
+
+func TestLeafGuardInstalledOnceAndRepaired(t *testing.T) {
+	env := setupMACsecEnv(t, true)
+	writeMeshConfig(t, enabledLeafConfig(env, true))
+	env.m.reconcile()
+	env.m.reconcile()
+	env.m.reconcile()
+	count := func() int {
+		n := 0
+		for _, op := range env.sys.Ops() {
+			if strings.HasPrefix(op, "nft guard") {
+				n++
+			}
+		}
+		return n
+	}
+	if got := count(); got != 1 {
+		t.Fatalf("guard rebuilt %d times over three passes", got)
+	}
+	env.sys.mu.Lock()
+	env.sys.tables[macsecGuardTable] = "table netdev mesh_macsec_guard {\n}\n"
+	env.sys.mu.Unlock()
+	env.m.reconcile()
+	if got := count(); got != 2 {
+		t.Fatal("flushed guard not repaired")
+	}
+	env.sys.NFTDeleteTable("netdev", macsecGuardTable)
+	env.m.reconcile()
+	if got := count(); got != 3 {
+		t.Fatal("deleted guard not restored")
 	}
 }
 
@@ -968,7 +1120,7 @@ func TestNoPeerErrorWhenMKANeverSecures(t *testing.T) {
 	}
 	env.clock = env.clock.Add(macsecNoPeerAfter + time.Second)
 	env.m.reconcile()
-	if e := env.m.Status().Links[0].Error; e != "MACsec link not up on eth1" {
+	if e := env.m.Status().Links[0].Error; e != "Encrypted Link (MACsec) not up on eth1" {
 		t.Fatalf("no actionable error for a missing MKA peer: %q", e)
 	}
 	env.m.reconcile()
@@ -1004,10 +1156,14 @@ func TestPlaintextRoutesKeepOriginalMTUOnRaisedParent(t *testing.T) {
 		{Family: 4, Dst: "192.168.2.4/30", Protocol: "kernel", Scope: "link", PrefSrc: "192.168.2.5"},
 		{Family: 4, Dst: "10.0.0.0/8", Gateway: "192.168.2.6", Metric: 50},
 		{Family: 4, Dst: "192.168.2.8/30", Protocol: "kernel", Scope: "link", MTU: 1400},
+		{Family: 4, Dst: "169.254.83.2", Scope: "link", PrefSrc: "169.254.83.1"},
 	}}
 	writeMeshConfig(t, mainConfigWithLeaves(1, 1))
 	env.m.reconcile()
 	ops := env.sys.Ops()
+	if indexOf(ops, "route-mtu eth1 169.254.83.2") >= 0 {
+		t.Fatalf("encrypted underlay route pinned to the plaintext MTU: %v", ops)
+	}
 	raise := indexOf(ops, "mtu eth1 1532")
 	if raise < 0 || !contains(ops, "route-mtu eth1 192.168.2.4/30 1500") || !contains(ops, "route-mtu eth1 10.0.0.0/8 1500") {
 		t.Fatalf("plaintext routes on the raised LAN parent not pinned to 1500: %v", ops)

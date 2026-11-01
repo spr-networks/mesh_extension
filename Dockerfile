@@ -39,7 +39,7 @@ ARG UBUNTU_SNAPSHOT=20261021T000000Z
 RUN set -eux; \
     printf 'Types: deb\nURIs: https://snapshot.ubuntu.com/ubuntu/%s\nSuites: noble noble-updates noble-security\nComponents: main restricted universe multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' "${UBUNTU_SNAPSHOT}" > /etc/apt/sources.list.d/ubuntu.sources; \
     printf 'APT::Install-Recommends "false";\nAcquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99reproducible
-RUN apt-get update && apt-get install -y --no-install-recommends wpasupplicant && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
+RUN apt-get update && apt-get install -y --no-install-recommends wpasupplicant wireguard-tools && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 COPY scripts /scripts/
 COPY --from=builder /mesh /
 ENTRYPOINT ["/scripts/startup.sh"]

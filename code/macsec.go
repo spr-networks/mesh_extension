@@ -43,20 +43,27 @@ const (
 )
 
 type LeafMACsec struct {
-	Enabled  bool
-	Port     int
-	KeyNonce string
-	Parent   string
-	LinkMTU  int
-	LeafMAC  string
+	Enabled       bool
+	Mode          string `json:",omitempty"`
+	Port          int
+	KeyNonce      string
+	Parent        string
+	LinkMTU       int
+	UnderlayMTU   int `json:",omitempty"`
+	LeafMAC       string
+	LeafPublicKey string `json:",omitempty"`
 }
 
 type LeafSideMACsec struct {
-	Enabled   bool
-	Confirmed bool
-	KeyNonce  string
-	LinkMTU   int
-	EnabledAt int64
+	Enabled       bool
+	Mode          string `json:",omitempty"`
+	Confirmed     bool
+	KeyNonce      string
+	LinkMTU       int
+	UnderlayMTU   int    `json:",omitempty"`
+	Port          int    `json:",omitempty"`
+	MainPublicKey string `json:",omitempty"`
+	EnabledAt     int64
 }
 
 type macsecKeys struct {
@@ -74,18 +81,18 @@ func newMACsecNonce() (string, error) {
 
 func decodeMACsecNonce(nonceHex string) ([]byte, error) {
 	if len(nonceHex) != 2*macsecNonceLen {
-		return nil, errors.New("invalid MACsec key nonce length")
+		return nil, errors.New("invalid key nonce length")
 	}
 	nonce, err := hex.DecodeString(nonceHex)
 	if err != nil {
-		return nil, errors.New("invalid MACsec key nonce encoding")
+		return nil, errors.New("invalid key nonce encoding")
 	}
 	return nonce, nil
 }
 
 func deriveMACsecKeys(secret string, nonceHex string) (macsecKeys, error) {
 	if len(secret) < macsecMinSecretLen {
-		return macsecKeys{}, errors.New("pairing secret too short for MACsec key derivation")
+		return macsecKeys{}, errors.New("pairing secret too short for key derivation")
 	}
 	nonce, err := decodeMACsecNonce(nonceHex)
 	if err != nil {
@@ -294,7 +301,7 @@ func macsecLinkMTU(local, peer int) (int, error) {
 		mtu = macsecEthernetMTU
 	}
 	if mtu < macsecMinLinkMTU {
-		return 0, fmt.Errorf("MACsec link MTU %d below minimum %d", mtu, macsecMinLinkMTU)
+		return 0, fmt.Errorf("%s MTU %d below minimum %d", backhaulLabel(backhaulMACsec), mtu, macsecMinLinkMTU)
 	}
 	return mtu, nil
 }
