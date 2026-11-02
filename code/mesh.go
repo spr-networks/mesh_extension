@@ -1371,6 +1371,7 @@ func main() {
 	unix_plugin_router.HandleFunc("/leafRouter/macsec", leafRouterMACsec).Methods("PUT")
 	unix_plugin_router.HandleFunc("/leafRouter/backhaul", leafRouterMACsec).Methods("PUT")
 	unix_plugin_router.HandleFunc("/leafRouter/backhaul/mtu", leafRouterMTUTest).Methods("PUT")
+	unix_plugin_router.HandleFunc("/leafRouter/backhaul/jumbo", leafRouterJumbo).Methods("PUT")
 	unix_plugin_router.HandleFunc("/macsec/peer", macsecPeer).Methods("PUT")
 	unix_plugin_router.HandleFunc("/macsec/status", macsecStatusHandler).Methods("GET")
 

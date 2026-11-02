@@ -507,6 +507,7 @@ func enabledLeafConfig(env *macsecTestEnv, confirmed bool) MeshConfig {
 		Confirmed: confirmed,
 		KeyNonce:  testNonce,
 		LinkMTU:   1500,
+		Jumbo:     true,
 		EnabledAt: env.clock.Add(-macsecApplyDelay).Unix(),
 	}}
 }
@@ -806,7 +807,7 @@ func mainConfigWithLeaves(n, enabled int) MeshConfig {
 	for i := 0; i < n; i++ {
 		leaf := LeafRouter{IP: fmt.Sprintf("192.168.2.%d", 10+i), APIToken: fmt.Sprintf("%s%02d", testPairingToken[:41], i), TLSCA: "ca"}
 		if i < enabled {
-			leaf.MACsec = &LeafMACsec{Enabled: true, Port: 2 + i, KeyNonce: testNonce, Parent: "eth1", LinkMTU: 1500, LeafMAC: fmt.Sprintf("00:11:22:33:44:%02x", i)}
+			leaf.MACsec = &LeafMACsec{Enabled: true, Port: 2 + i, KeyNonce: testNonce, Parent: "eth1", LinkMTU: 1500, Jumbo: true, LeafMAC: fmt.Sprintf("00:11:22:33:44:%02x", i)}
 		}
 		config.LeafRouters = append(config.LeafRouters, leaf)
 	}

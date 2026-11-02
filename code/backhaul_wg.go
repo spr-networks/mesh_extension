@@ -31,6 +31,7 @@ const (
 	meshVXLANOverhead = 50
 	meshJumboMTU      = 9000
 	meshWGFresh       = 3 * time.Minute
+	meshJumboSettle   = 30 * time.Second
 	meshWGMaxPort     = 254
 )
 
@@ -312,6 +313,23 @@ func underlayOrDefault(mtu int) int {
 	return mtu
 }
 
+func meshUnderlay(jumbo bool, mtu int) int {
+	if !jumbo {
+		return macsecEthernetMTU
+	}
+	return underlayOrDefault(mtu)
+}
+
+func effectiveLinkMTU(mode string, jumbo bool, underlay int, linkMTU int) int {
+	if storedMode(mode) == backhaulWireGuard {
+		return wgInnerMTU(meshUnderlay(jumbo, underlay))
+	}
+	if limit := macsecCapableMTU(macsecEthernetMTU); !jumbo && limit < linkMTU {
+		return limit
+	}
+	return linkMTU
+}
+
 func (m *macsecManager) mainWGLeaf(leaf LeafRouter, info linkInfo, st *MACsecLinkStatus) error {
 	cfg := leaf.MACsec
 	if !validWGPort(cfg.Port) {
@@ -331,7 +349,7 @@ func (m *macsecManager) mainWGLeaf(leaf LeafRouter, info linkInfo, st *MACsecLin
 	if err != nil {
 		return err
 	}
-	underlay := underlayOrDefault(cfg.UnderlayMTU)
+	underlay := meshUnderlay(cfg.Jumbo, cfg.UnderlayMTU)
 	if err := m.applyOnce("underlay-"+cfg.Parent+"-"+strconv.Itoa(cfg.Port), "set", func() error {
 		if err := m.sys.Cmd("ip", "addr", "replace", meshUnderlayIP(meshMainSide)+"/32", "dev", cfg.Parent); err != nil {
 			return err
@@ -422,7 +440,7 @@ func (m *macsecManager) leafWG(cfg LeafSideMACsec, wanif string, token string, s
 	if err != nil {
 		return false, err
 	}
-	underlay := underlayOrDefault(cfg.UnderlayMTU)
+	underlay := meshUnderlay(cfg.Jumbo, cfg.UnderlayMTU)
 	local := meshUnderlayIP(cfg.Port)
 	if err := m.applyOnce("underlay-"+wanif, local, func() error {
 		if err := m.sys.Cmd("ip", "addr", "replace", local+"/32", "dev", wanif); err != nil {
@@ -474,7 +492,7 @@ func (m *macsecManager) teardownWG(wanif string) {
 }
 
 func (execMACsecSys) Cmd(name string, args ...string) error {
-	if name != "ip" && name != "wg" {
+	if name != "ip" && name != "wg" && name != "ethtool" {
 		return errors.New("unexpected command")
 	}
 	return runQuiet(name, args...)

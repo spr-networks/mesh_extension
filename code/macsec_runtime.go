@@ -131,6 +131,7 @@ type macsecManager struct {
 	wgParents  map[string]bool
 	wgMainMTU  int
 	mtuTesting map[string]bool
+	mtuRaised  map[string]time.Time
 	wgSeen     bool
 	kick       chan struct{}
 }
@@ -147,6 +148,7 @@ func newMACsecManager(sys macsecSys) *macsecManager {
 		wgApplied:  map[string]string{},
 		wgParents:  map[string]bool{},
 		mtuTesting: map[string]bool{},
+		mtuRaised:  map[string]time.Time{},
 		mtuInUse:   map[string]bool{},
 		kick:       make(chan struct{}, 1),
 	}
@@ -391,6 +393,10 @@ func (m *macsecManager) raiseParentMTUTo(parent string, info linkInfo, target in
 		fmt.Println("[-] macsec: could not raise MTU of", parent, err)
 		return info
 	}
+	if m.mtuRaised == nil {
+		m.mtuRaised = map[string]time.Time{}
+	}
+	m.mtuRaised[parent] = m.now()
 	info.MTU = target
 	return info
 }
@@ -431,9 +437,12 @@ func (m *macsecManager) restoreUnusedMTU() {
 		if _, err := m.sys.LinkInfo(parent); err == nil {
 			if err := m.sys.SetMTU(parent, mtu); err != nil {
 				fmt.Println("[-] macsec: could not restore MTU of", parent, err)
+			} else {
+				m.sys.Cmd("ethtool", "-r", parent)
 			}
 		}
 		delete(m.origMTU, parent)
+		delete(m.mtuRaised, parent)
 		changed = true
 	}
 	if changed {
@@ -547,7 +556,7 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 	m.wgMainMTU = 0
 	for _, leaf := range config.LeafRouters {
 		if leaf.MACsec != nil && leaf.MACsec.Enabled && storedMode(leaf.MACsec.Mode) == backhaulWireGuard {
-			mtu := underlayOrDefault(leaf.MACsec.UnderlayMTU) - meshWGOverhead
+			mtu := meshUnderlay(leaf.MACsec.Jumbo, leaf.MACsec.UnderlayMTU) - meshWGOverhead
 			if m.wgMainMTU == 0 || mtu < m.wgMainMTU {
 				m.wgMainMTU = mtu
 			}
@@ -577,18 +586,22 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 			Parent:  cfg.Parent,
 			Port:    cfg.Port,
 			LeafMAC: cfg.LeafMAC,
-			LinkMTU: cfg.LinkMTU,
+			LinkMTU: effectiveLinkMTU(cfg.Mode, cfg.Jumbo, cfg.UnderlayMTU, cfg.LinkMTU),
 			Mode:    storedMode(cfg.Mode),
 		}
 		if st.Mode == backhaulWireGuard {
-			st.Underlay = cfg.UnderlayMTU
+			if cfg.Jumbo {
+				st.Underlay = cfg.UnderlayMTU
+			}
 			info, err := m.sys.LinkInfo(cfg.Parent)
 			if err != nil {
 				st.Error = "parent interface unavailable"
 				status.Links = append(status.Links, st)
 				continue
 			}
-			info = m.raiseParentMTUTo(cfg.Parent, info, meshJumboMTU)
+			if cfg.Jumbo {
+				info = m.raiseParentMTUTo(cfg.Parent, info, meshJumboMTU)
+			}
 			if !pinned[cfg.Parent] {
 				pinned[cfg.Parent] = true
 				m.pinPlaintextRoutes(cfg.Parent, info)
@@ -631,7 +644,9 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 			status.Links = append(status.Links, st)
 			continue
 		}
-		info = m.raiseParentMTU(cfg.Parent, info)
+		if cfg.Jumbo {
+			info = m.raiseParentMTU(cfg.Parent, info)
+		}
 		if !pinned[cfg.Parent] {
 			pinned[cfg.Parent] = true
 			m.pinPlaintextRoutes(cfg.Parent, info)
@@ -792,9 +807,9 @@ func (m *macsecManager) reconcileLeaf(config MeshConfig) {
 	}
 	m.sys.DisableIPv6(wanif)
 	m.sys.SetUp(wanif)
-	if wg {
+	if cfg.Jumbo && wg {
 		info = m.raiseParentMTUTo(wanif, info, meshJumboMTU)
-	} else {
+	} else if cfg.Jumbo {
 		info = m.raiseParentMTU(wanif, info)
 	}
 
@@ -825,7 +840,9 @@ func (m *macsecManager) reconcileLeaf(config MeshConfig) {
 	if wg {
 		st.Mode = backhaulWireGuard
 		st.Port = cfg.Port
-		st.Underlay = cfg.UnderlayMTU
+		if cfg.Jumbo {
+			st.Underlay = cfg.UnderlayMTU
+		}
 		m.stopAllMKA(nil)
 		if links, err := m.sys.Links(); err == nil {
 			for _, link := range links {
@@ -845,7 +862,7 @@ func (m *macsecManager) reconcileLeaf(config MeshConfig) {
 		if msg := m.noPeerErrorFor(backhaulLabel(backhaulWireGuard), "leaf-wg", wanif, secured); msg != "" && st.Error == "" {
 			st.Error = msg
 		}
-		m.applyMSSClamp(cfg.LinkMTU)
+		m.applyMSSClamp(effectiveLinkMTU(cfg.Mode, cfg.Jumbo, cfg.UnderlayMTU, cfg.LinkMTU))
 		return
 	}
 	if m.linkExists(meshWGIface) {
@@ -897,7 +914,7 @@ func (m *macsecManager) reconcileLeaf(config MeshConfig) {
 		st.Error = msg
 	}
 	m.restartIfStuck("leaf", secured)
-	m.applyMSSClamp(cfg.LinkMTU)
+	m.applyMSSClamp(effectiveLinkMTU(cfg.Mode, cfg.Jumbo, cfg.UnderlayMTU, cfg.LinkMTU))
 }
 
 func (m *macsecManager) confirmOrRevert(cfg *LeafSideMACsec, secured bool, wanif string) {

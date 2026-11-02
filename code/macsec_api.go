@@ -25,6 +25,7 @@ type macsecPeerRequest struct {
 	Mode          string `json:",omitempty"`
 	Port          int    `json:",omitempty"`
 	UnderlayMTU   int    `json:",omitempty"`
+	Jumbo         bool   `json:",omitempty"`
 	MainPublicKey string `json:",omitempty"`
 }
 
@@ -42,6 +43,7 @@ type leafMACsecRequest struct {
 	Mode   string
 	Parent string
 	MTU    int
+	Jumbo  bool
 }
 
 var macsecChangeMtx sync.Mutex
@@ -164,7 +166,12 @@ func (m *macsecManager) enableLeafMACsec(leaf LeafRouter, leaves []LeafRouter, r
 	if err != nil {
 		return LeafMACsec{}, fmt.Errorf("parent interface %s unavailable", parent)
 	}
-	localMTU := parentCapableMTU(info)
+	current := leaf.MACsec
+	jumbo := current != nil && current.Enabled && current.Jumbo
+	localMTU := macsecCapableMTU(macsecEthernetMTU)
+	if jumbo {
+		localMTU = parentCapableMTU(info)
+	}
 	if requestedMTU != 0 && requestedMTU < localMTU {
 		localMTU = requestedMTU
 	}
@@ -172,9 +179,8 @@ func (m *macsecManager) enableLeafMACsec(leaf LeafRouter, leaves []LeafRouter, r
 		return LeafMACsec{}, fmt.Errorf("parent interface %s MTU too small for %s", parent, backhaulLabel(mode))
 	}
 
-	current := leaf.MACsec
 	sameAssociation := current != nil && current.Enabled && current.KeyNonce != "" && storedMode(current.Mode) == mode
-	next := LeafMACsec{Enabled: true, Parent: parent}
+	next := LeafMACsec{Enabled: true, Parent: parent, Jumbo: jumbo}
 	if mode == backhaulWireGuard {
 		next.Mode = backhaulWireGuard
 	}
@@ -208,6 +214,7 @@ func (m *macsecManager) enableLeafMACsec(leaf LeafRouter, leaves []LeafRouter, r
 		KeyNonce: next.KeyNonce,
 		PeerMTU:  localMTU,
 		Mode:     next.Mode,
+		Jumbo:    next.Jumbo,
 	}
 	if mode == backhaulWireGuard {
 		request.PeerMTU = 0
@@ -235,7 +242,7 @@ func (m *macsecManager) enableLeafMACsec(leaf LeafRouter, leaves []LeafRouter, r
 			return LeafMACsec{}, errors.New("leaf sent an invalid WireGuard key")
 		}
 		next.LeafPublicKey = reply.LeafPublicKey
-		next.LinkMTU = wgInnerMTU(underlayOrDefault(next.UnderlayMTU))
+		next.LinkMTU = wgInnerMTU(meshUnderlay(next.Jumbo, next.UnderlayMTU))
 		return next, nil
 	}
 	next.LinkMTU, err = macsecLinkMTU(localMTU, reply.MaxMTU)
@@ -436,14 +443,17 @@ func macsecPeer(w http.ResponseWriter, r *http.Request) {
 	}
 	if wg {
 		reply.MaxMTU = wgCapableUnderlay(uplink)
-		reply.LinkMTU = wgInnerMTU(underlayOrDefault(request.UnderlayMTU))
+		reply.LinkMTU = wgInnerMTU(meshUnderlay(request.Jumbo, request.UnderlayMTU))
 		reply.LeafPublicKey, err = loadOrCreateWGKey()
 		if err != nil {
 			http.Error(w, "WireGuard key unavailable", 500)
 			return
 		}
 	} else {
-		reply.MaxMTU = parentCapableMTU(uplink)
+		reply.MaxMTU = macsecCapableMTU(macsecEthernetMTU)
+		if request.Jumbo {
+			reply.MaxMTU = parentCapableMTU(uplink)
+		}
 		reply.LinkMTU, err = macsecLinkMTU(reply.MaxMTU, request.PeerMTU)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
@@ -459,6 +469,7 @@ func macsecPeer(w http.ResponseWriter, r *http.Request) {
 		Enabled:   true,
 		KeyNonce:  request.KeyNonce,
 		LinkMTU:   reply.LinkMTU,
+		Jumbo:     request.Jumbo,
 		EnabledAt: time.Now().Unix(),
 	}
 	if wg {
@@ -519,34 +530,94 @@ func macsecTestMTU(ip string) (macsecMTUResult, int, error) {
 	}
 	next := *leaf.MACsec
 	next.UnderlayMTU = underlay
-	request := macsecPeerRequest{Token: leaf.APIToken, Enable: true, KeyNonce: next.KeyNonce, Mode: next.Mode}
 	if storedMode(next.Mode) == backhaulWireGuard {
-		next.LinkMTU = wgInnerMTU(underlay)
-		request.Port = next.Port
-		request.UnderlayMTU = underlay
-		if request.MainPublicKey, err = loadOrCreateWGKey(); err != nil {
-			return result, 500, err
-		}
+		next.LinkMTU = wgInnerMTU(meshUnderlay(next.Jumbo, underlay))
 	} else {
-		next.LinkMTU = macsecCapableMTU(underlay)
-		request.PeerMTU = next.LinkMTU
+		next.LinkMTU = effectiveLinkMTU(next.Mode, next.Jumbo, underlay, macsecCapableMTU(underlay))
 	}
-	if next != *leaf.MACsec {
-		if _, err := macsecCallLeaf(leaf, request); err != nil {
-			return result, http.StatusBadGateway, err
-		}
-		Configmtx.Lock()
-		config = loadConfigLocked()
-		index = findLeafByIP(config.LeafRouters, ip)
-		if index >= 0 && sameLeaf(config.LeafRouters[index], leaf) && config.LeafRouters[index].MACsec != nil &&
-			config.LeafRouters[index].MACsec.KeyNonce == next.KeyNonce {
-			config.LeafRouters[index].MACsec = &next
-			saveConfigLocked(config)
-		}
-		Configmtx.Unlock()
-		gMACsec.Kick()
+	if code, err := pushLeafUpdate(leaf, next); err != nil {
+		return result, code, err
 	}
 	return macsecMTUResult{UnderlayMTU: underlay, Jumbo: underlay >= meshJumboMTU, LinkMTU: next.LinkMTU}, 200, nil
+}
+
+func pushLeafUpdate(leaf LeafRouter, next LeafMACsec) (int, error) {
+	if next == *leaf.MACsec {
+		return 200, nil
+	}
+	request := macsecPeerRequest{Token: leaf.APIToken, Enable: true, KeyNonce: next.KeyNonce, Mode: next.Mode, Jumbo: next.Jumbo}
+	if storedMode(next.Mode) == backhaulWireGuard {
+		var err error
+		request.Port = next.Port
+		request.UnderlayMTU = next.UnderlayMTU
+		if request.MainPublicKey, err = loadOrCreateWGKey(); err != nil {
+			return 500, err
+		}
+	} else {
+		request.PeerMTU = next.LinkMTU
+	}
+	if _, err := macsecCallLeaf(leaf, request); err != nil {
+		return http.StatusBadGateway, err
+	}
+	Configmtx.Lock()
+	config := loadConfigLocked()
+	index := findLeafByIP(config.LeafRouters, leaf.IP)
+	if index >= 0 && sameLeaf(config.LeafRouters[index], leaf) && config.LeafRouters[index].MACsec != nil &&
+		config.LeafRouters[index].MACsec.KeyNonce == next.KeyNonce {
+		config.LeafRouters[index].MACsec = &next
+		saveConfigLocked(config)
+	}
+	Configmtx.Unlock()
+	gMACsec.Kick()
+	return 200, nil
+}
+
+func macsecSetJumbo(ip string, jumbo bool) (int, error) {
+	if isLeafRouter() {
+		return 400, errors.New("Encrypted Link is managed from the main router")
+	}
+	macsecChangeMtx.Lock()
+	defer macsecChangeMtx.Unlock()
+	Configmtx.Lock()
+	config := loadConfigLocked()
+	Configmtx.Unlock()
+	index := findLeafByIP(config.LeafRouters, ip)
+	if index < 0 {
+		return 404, errors.New("unknown leaf router")
+	}
+	leaf := config.LeafRouters[index]
+	if leaf.MACsec == nil || !leaf.MACsec.Enabled {
+		return 400, errors.New("encryption is not enabled for this mesh node")
+	}
+	if leaf.MACsec.Jumbo == jumbo {
+		return 200, nil
+	}
+	next := *leaf.MACsec
+	next.Jumbo = jumbo
+	next.UnderlayMTU = 0
+	if storedMode(next.Mode) == backhaulWireGuard {
+		next.LinkMTU = wgInnerMTU(meshUnderlay(jumbo, 0))
+	} else {
+		next.LinkMTU = macsecCapableMTU(macsecEthernetMTU)
+		if info, err := gMACsec.sys.LinkInfo(next.Parent); err == nil && jumbo {
+			next.LinkMTU = parentCapableMTU(info)
+		}
+	}
+	return pushLeafUpdate(leaf, next)
+}
+
+func leafRouterJumbo(w http.ResponseWriter, r *http.Request) {
+	request := leafMACsecRequest{}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&request); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if code, err := macsecSetJumbo(request.IP, request.Jumbo); err != nil {
+		http.Error(w, err.Error(), code)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(gMACsec.Status())
 }
 
 func leafRouterMTUTest(w http.ResponseWriter, r *http.Request) {
@@ -564,8 +635,14 @@ func leafRouterMTUTest(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+func (m *macsecManager) jumboTestDue(leaf LeafRouter, secured bool) bool {
+	cfg := leaf.MACsec
+	return secured && cfg.Jumbo && cfg.UnderlayMTU == 0 && !m.mtuTesting[leaf.IP] &&
+		m.now().Sub(m.mtuRaised[cfg.Parent]) >= meshJumboSettle
+}
+
 func (m *macsecManager) maybeTestMTU(leaf LeafRouter, secured bool) {
-	if !secured || leaf.MACsec.UnderlayMTU != 0 || m.mtuTesting[leaf.IP] || m.noCtlLoop {
+	if m.noCtlLoop || !m.jumboTestDue(leaf, secured) {
 		return
 	}
 	m.mtuTesting[leaf.IP] = true

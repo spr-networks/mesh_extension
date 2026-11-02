@@ -49,7 +49,8 @@ type LeafMACsec struct {
 	KeyNonce      string
 	Parent        string
 	LinkMTU       int
-	UnderlayMTU   int `json:",omitempty"`
+	UnderlayMTU   int  `json:",omitempty"`
+	Jumbo         bool `json:",omitempty"`
 	LeafMAC       string
 	LeafPublicKey string `json:",omitempty"`
 }
@@ -61,6 +62,7 @@ type LeafSideMACsec struct {
 	KeyNonce      string
 	LinkMTU       int
 	UnderlayMTU   int    `json:",omitempty"`
+	Jumbo         bool   `json:",omitempty"`
 	Port          int    `json:",omitempty"`
 	MainPublicKey string `json:",omitempty"`
 	EnabledAt     int64

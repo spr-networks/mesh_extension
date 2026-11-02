@@ -121,6 +121,7 @@ func wgLeafConfig(env *macsecTestEnv, mainPub string, confirmed bool) MeshConfig
 		Confirmed:     confirmed,
 		KeyNonce:      testNonce,
 		LinkMTU:       wgInnerMTU(1500),
+		Jumbo:         true,
 		Port:          2,
 		MainPublicKey: mainPub,
 		EnabledAt:     env.clock.Add(-macsecApplyDelay).Unix(),
@@ -473,5 +474,136 @@ func TestMACsecPeerWireGuard(t *testing.T) {
 	unsupported.sys.probeWGErr = errors.New("no module")
 	if rec := doJSON(t, macsecPeer, http.MethodPut, good); rec.Code != 400 {
 		t.Fatalf("enabled on a leaf without WireGuard: %d", rec.Code)
+	}
+}
+
+func TestJumboOffLeavesPortMTUAlone(t *testing.T) {
+	env := setupMACsecEnv(t, false)
+	config, leafPub := wgMainConfig(t, 9000)
+	config.LeafRouters[0].MACsec.Jumbo = false
+	writeMeshConfig(t, config)
+	env.m.reconcile()
+	ops := env.sys.Ops()
+	for _, op := range ops {
+		if strings.HasPrefix(op, "mtu eth1") || strings.HasPrefix(op, "route-mtu") || strings.HasPrefix(op, "cmd ethtool") {
+			t.Fatalf("port touched without jumbo frames: %v", ops)
+		}
+	}
+	if !contains(ops, "mtu wgmesh 1440") || env.sys.infos["mshvx2"].MTU != 1390 {
+		t.Fatalf("tunnel sized for a jumbo underlay: %v", ops)
+	}
+	env.sys.handshakes = map[string]int64{leafPub: env.clock.Unix()}
+	env.m.reconcile()
+	if st := env.m.Status().Links[0]; !st.Secured || st.Underlay != 0 || st.LinkMTU != 1390 {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+func TestLeafJumboOffKeepsUplinkMTU(t *testing.T) {
+	env := setupMACsecEnv(t, true)
+	config := wgLeafConfig(env, newTestWGPub(t), false)
+	config.LeafMACsec.Jumbo = false
+	config.LeafMACsec.UnderlayMTU = 9000
+	writeMeshConfig(t, config)
+	env.m.reconcile()
+	ops := env.sys.Ops()
+	if indexOf(ops, "mtu eth0 9000") >= 0 {
+		t.Fatalf("uplink raised without jumbo frames: %v", ops)
+	}
+	if !contains(ops, "mtu wgmesh 1440") || !contains(ops, "mtu mshvx0 1390") || !contains(ops, "nft mss 1350") {
+		t.Fatalf("tunnel not sized for a 1500 byte uplink: %v", ops)
+	}
+}
+
+func TestJumboOffRestoresPortAndRenegotiates(t *testing.T) {
+	env := setupMACsecEnv(t, false)
+	config, _ := wgMainConfig(t, 9000)
+	writeMeshConfig(t, config)
+	env.m.reconcile()
+	if env.sys.infos["eth1"].MTU != 9000 || indexOf(env.sys.Ops(), "cmd ethtool -r eth1") >= 0 {
+		t.Fatalf("jumbo raise: %v", env.sys.Ops())
+	}
+	config.LeafRouters[0].MACsec.Jumbo = false
+	writeMeshConfig(t, config)
+	env.m.reconcile()
+	ops := env.sys.Ops()
+	restore := indexOf(ops, "mtu eth1 1500")
+	if restore < 0 || indexOf(ops, "cmd ethtool -r eth1") < restore {
+		t.Fatalf("port not restored and renegotiated: %v", ops)
+	}
+}
+
+func TestJumboTestWaitsForTheLinkToSettle(t *testing.T) {
+	env := setupMACsecEnv(t, false)
+	config, _ := wgMainConfig(t, 0)
+	writeMeshConfig(t, config)
+	env.m.reconcile()
+	leaf := config.LeafRouters[0]
+	if env.m.jumboTestDue(leaf, true) {
+		t.Fatal("tested while the port was renegotiating")
+	}
+	env.clock = env.clock.Add(meshJumboSettle)
+	if !env.m.jumboTestDue(leaf, true) {
+		t.Fatal("jumbo link never tested")
+	}
+	if env.m.jumboTestDue(leaf, false) {
+		t.Fatal("tested a link that is not up")
+	}
+	off := leaf
+	cfg := *leaf.MACsec
+	cfg.Jumbo = false
+	off.MACsec = &cfg
+	if env.m.jumboTestDue(off, true) {
+		t.Fatal("tested with jumbo frames off")
+	}
+	tested := leaf
+	cfg = *leaf.MACsec
+	cfg.UnderlayMTU = 9000
+	tested.MACsec = &cfg
+	if env.m.jumboTestDue(tested, true) {
+		t.Fatal("retested an already measured link")
+	}
+}
+
+func TestJumboSwitchUpdatesBothRouters(t *testing.T) {
+	setupMACsecEnv(t, false)
+	config, _ := wgMainConfig(t, 0)
+	config.LeafRouters[0].MACsec.Jumbo = false
+	writeMeshConfig(t, config)
+	leaf := config.LeafRouters[0]
+	calls := stubLeaf(t, goodLeafReply, nil)
+
+	if rec := doJSON(t, leafRouterJumbo, http.MethodPut, leafMACsecRequest{IP: leaf.IP, Jumbo: true}); rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	saved := readMeshConfig().LeafRouters[0].MACsec
+	if !saved.Jumbo || saved.UnderlayMTU != 0 || saved.KeyNonce != leaf.MACsec.KeyNonce {
+		t.Fatalf("main config %+v", saved)
+	}
+	if len(*calls) != 1 || !(*calls)[0].request.Jumbo || (*calls)[0].request.KeyNonce != leaf.MACsec.KeyNonce || (*calls)[0].request.Mode != backhaulWireGuard {
+		t.Fatalf("node not told: %+v", *calls)
+	}
+	if rec := doJSON(t, leafRouterJumbo, http.MethodPut, leafMACsecRequest{IP: leaf.IP, Jumbo: true}); rec.Code != 200 || len(*calls) != 1 {
+		t.Fatalf("unchanged setting resent: %d %+v", rec.Code, *calls)
+	}
+
+	measured := readMeshConfig()
+	measured.LeafRouters[0].MACsec.UnderlayMTU = 9000
+	measured.LeafRouters[0].MACsec.LinkMTU = 1500
+	writeMeshConfig(t, measured)
+	if rec := doJSON(t, leafRouterJumbo, http.MethodPut, leafMACsecRequest{IP: leaf.IP, Jumbo: false}); rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	saved = readMeshConfig().LeafRouters[0].MACsec
+	if saved.Jumbo || saved.UnderlayMTU != 0 || saved.LinkMTU != 1390 {
+		t.Fatalf("main config %+v", saved)
+	}
+	if len(*calls) != 2 || (*calls)[1].request.Jumbo || (*calls)[1].request.UnderlayMTU != 0 {
+		t.Fatalf("node not told: %+v", *calls)
+	}
+
+	writeMeshConfig(t, mainConfigWithLeaves(1, 0))
+	if rec := doJSON(t, leafRouterJumbo, http.MethodPut, leafMACsecRequest{IP: leaf.IP, Jumbo: true}); rec.Code != 400 {
+		t.Fatalf("jumbo set on an unencrypted link: %d", rec.Code)
 	}
 }

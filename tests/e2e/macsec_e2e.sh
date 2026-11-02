@@ -143,6 +143,14 @@ LEAF_ETH0_MAC=$(ip -n leaf -br link show dev eth0 | awk '{print $3}')
 nsx main ip addr del 10.88.0.1/24 dev eth1
 nsx main ip addr add 10.88.0.1/24 dev $MAIN_SECY
 
+[ "$(mtu leaf eth0)" = 1500 ] && [ "$(mtu main eth1)" = 1500 ] && [ "$(mtu leaf $LEAF_SECY)" = 1468 ] \
+  && pass "jumbo frames off by default: ports stay at 1500, secYs carry 1468" \
+  || fail "jumbo off: leaf eth0=$(mtu leaf eth0) secY=$(mtu leaf $LEAF_SECY) main eth1=$(mtu main eth1)"
+wait_for 30 station_ping 1 || fail "station cannot reach main over MACsec without jumbo frames"
+JUMBO=$(api $M PUT /leafRouter/backhaul/jumbo '{"IP":"10.88.0.2","Jumbo":true}') || fail "jumbo on failed: $JUMBO"
+secys_carry_1500() { [ "$(mtu leaf eth0)" = 1532 ] && [ "$(mtu leaf $LEAF_SECY)" = 1500 ] && [ "$(mtu main eth1)" = 1532 ] && [ "$(mtu main $MAIN_SECY)" = 1500 ]; }
+wait_for 30 secys_carry_1500
+
 [ "$(api $L GET /macsec/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["Confirmed"])')" = "True" ] \
   && pass "leaf confirmed the association" || fail "leaf not confirmed"
 [ "$(api $M GET /macsec/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["Strict"])')" = "True" ] \

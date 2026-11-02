@@ -160,14 +160,14 @@ func TestLeafRouterMACsecEnable(t *testing.T) {
 	}
 	sent := (*calls)[0].request
 	leaf := readMeshConfig().LeafRouters[0]
-	if sent.Token != leaf.APIToken || !sent.Enable || sent.PeerMTU != 1500 {
-		t.Fatalf("sent %+v", sent)
+	if sent.Token != leaf.APIToken || !sent.Enable || sent.PeerMTU != 1468 || sent.Jumbo {
+		t.Fatalf("new link should start without jumbo frames: %+v", sent)
 	}
 	if _, err := decodeMACsecNonce(sent.KeyNonce); err != nil {
 		t.Fatal(err)
 	}
 	m := leaf.MACsec
-	if m == nil || !m.Enabled || m.Port != 2 || m.Parent != "eth1" || m.KeyNonce != sent.KeyNonce || m.LeafMAC != "00:11:22:33:44:55" || m.LinkMTU != 1500 {
+	if m == nil || !m.Enabled || m.Port != 2 || m.Parent != "eth1" || m.KeyNonce != sent.KeyNonce || m.LeafMAC != "00:11:22:33:44:55" || m.LinkMTU != 1468 || m.Jumbo {
 		t.Fatalf("persisted %+v", m)
 	}
 	if strings.Contains(rec.Body.String(), leaf.APIToken) || strings.Contains(rec.Body.String(), m.KeyNonce) {

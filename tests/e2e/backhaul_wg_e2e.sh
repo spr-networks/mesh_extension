@@ -130,6 +130,14 @@ ports | grep -qx mshvx0 && pass "VXLAN port bridged into br0" || fail "VXLAN por
 GUARD=$(nsx leaf nft list table netdev mesh_macsec_guard 2>&1)
 echo "$GUARD" | grep -q "udp sport 51821" && pass "WireGuard guard installed on the node" || fail "guard missing: $GUARD"
 
+wait_for 30 station_ping 1 || fail "station cannot reach main over WireGuard without jumbo frames"
+[ "$(mtu main eth1)" = 1500 ] && [ "$(mtu leaf eth0)" = 1500 ] && [ "$(mtu leaf mshvx0)" = 1390 ] \
+  && wait_for 30 nsx leaf nft list table bridge mesh_macsec_mss && station_ping 2 -M do -s 1362 \
+  && ! station_ping 1 -M do -s 1363 \
+  && pass "jumbo frames off by default: ports stay at 1500, stations get 1390 with the MSS clamp" \
+  || fail "jumbo off: main eth1=$(mtu main eth1) leaf eth0=$(mtu leaf eth0) vx=$(mtu leaf mshvx0)"
+JUMBO=$(api $M PUT /leafRouter/backhaul/jumbo '{"IP":"10.88.0.2","Jumbo":true}') || fail "jumbo on failed: $JUMBO"
+
 wait_for 120 main_underlay 9000 && pass "jumbo frame test found a 9000 byte path" || fail "jumbo frame test result: $(field $M Underlay)"
 wait_for 30 sh -c "[ \"\$(ip -n leaf -j link show dev mshvx0 | python3 -c 'import json,sys; print(json.load(sys.stdin)[0][\"mtu\"])')\" = 1500 ]" \
   && [ "$(mtu main $MAIN_VX)" = 1500 ] && [ "$(mtu main eth1)" = 9000 ] && [ "$(mtu leaf eth0)" = 9000 ] \
@@ -188,6 +196,12 @@ wait_for 60 leaf_secured && wait_for 30 station_ping 1 && pass "node plugin rest
 capture_stop
 [ "$(tcpdump -r $W/restart.pcap -nn -e "ether host $STA_MAC or host 10.88.0.3" 2>/dev/null | wc -l)" = 0 ] \
   && pass "no plaintext during the node restart" || fail "plaintext during restart"
+
+ports_at_1500() { [ "$(mtu main eth1)" = 1500 ] && [ "$(mtu leaf eth0)" = 1500 ] && [ "$(mtu leaf mshvx0)" = 1390 ]; }
+JUMBO=$(api $M PUT /leafRouter/backhaul/jumbo '{"IP":"10.88.0.2","Jumbo":false}') || fail "jumbo off failed: $JUMBO"
+wait_for 30 ports_at_1500 && [ -z "$(field $M Underlay)" ] && wait_for 30 station_ping 2 -M do -s 1362 \
+  && pass "turning jumbo frames off restores both ports to 1500 and keeps the link up" \
+  || fail "jumbo off: main eth1=$(mtu main eth1) leaf eth0=$(mtu leaf eth0) vx=$(mtu leaf mshvx0) underlay=$(field $M Underlay)"
 
 nsx sw nft -f - << 'EOF'
 table bridge block {
