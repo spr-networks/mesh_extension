@@ -45,6 +45,13 @@ status_field() {
   api "$1" GET /macsec/status | python3 -c "import json,sys; s=json.load(sys.stdin); print(s['Links'][0].get('$2','') if s['Links'] else '')"
 }
 
+bridge_state() { echo "br=$(ip -n main -br link show dev mshbr0 2>&1 | awk '{print $3}') eth1=$(ip -n main -br link show dev eth1 | awk '{print $3}') tables=$(nsx main nft list tables 2>&1 | tr '\n' ' ')"; }
+main_bridge_ok() {
+  local port; port=$(ip -n main -d link show dev "$1")
+  [[ $port == *"master mshbr0"* && $port == *"isolated on"* ]] \
+    && [ "$(ip -n main -br link show dev mshbr0 | awk '{print $3}')" = "$(ip -n main -br link show dev eth1 | awk '{print $3}')" ] \
+    && [[ $(nsx main nft list table bridge mesh_bridge_guard) == *"ether saddr"* ]]
+}
 leaf_secured() { [ "$(status_field $L Secured)" = "True" ]; }
 main_secured() { [ "$(status_field $M Secured)" = "True" ]; }
 ports() { ip -n leaf -o link show master br0 | awk -F': ' '{print $2}' | cut -d@ -f1; }
@@ -137,11 +144,14 @@ wait_for 180 leaf_secured || die "leaf never secured"
 wait_for 60 main_secured || die "main never secured"
 pass "MKA secured the link on both routers"
 
-MAIN_SECY=$(status_field $M Interface)
+MAIN_SECY=$(status_field $M Member)
 LEAF_SECY=$(status_field $L Interface)
 LEAF_ETH0_MAC=$(ip -n leaf -br link show dev eth0 | awk '{print $3}')
+[ "$(status_field $M Interface)" = mshbr0 ] && main_bridge_ok $MAIN_SECY \
+  && pass "main router bridges $MAIN_SECY into mshbr0, isolated, with eth1's MAC and the node MAC guard" \
+  || fail "main bridge: interface=$(status_field $M Interface) $(bridge_state) port=$(ip -n main -d link show dev $MAIN_SECY | grep -o 'master [^ ]*\|isolated [a-z]*' | tr '\n' ' ')"
 nsx main ip addr del 10.88.0.1/24 dev eth1
-nsx main ip addr add 10.88.0.1/24 dev $MAIN_SECY
+nsx main ip addr add 10.88.0.1/24 dev mshbr0
 
 [ "$(mtu leaf eth0)" = 1500 ] && [ "$(mtu main eth1)" = 1500 ] && [ "$(mtu leaf $LEAF_SECY)" = 1468 ] \
   && pass "jumbo frames off by default: ports stay at 1500, secYs carry 1468" \
@@ -239,6 +249,17 @@ ip -n sw link set sw0 type bridge group_fwd_mask 8
 wait_for 120 leaf_secured && wait_for 60 main_secured && wait_for 30 station_ping 1 \
   && pass "link recovers once 802.1X frames pass again" || fail "link did not recover"
 
+capture_start $W/bounce.pcap
+ip -n leaf link set eth0 down; sleep 2; ip -n leaf link set eth0 up
+wait_for 120 leaf_secured && wait_for 60 main_secured && wait_for 30 station_ping 1 \
+  && pass "link recovers after the node uplink goes down and up" || fail "no recovery after the node uplink went down and up"
+ip -n main link set eth1 down; sleep 2; ip -n main link set eth1 up
+wait_for 120 leaf_secured && wait_for 60 main_secured && wait_for 30 station_ping 1 \
+  && pass "link recovers after the main router port goes down and up" || fail "no recovery after the main router port went down and up"
+capture_stop
+ports | grep -qx eth0 && fail "raw uplink bridged after the uplink went down and up"
+[ "$(plaintext_leak $W/bounce.pcap)" = 0 ] && pass "no plaintext while the uplinks went down and up" || fail "plaintext during the uplink bounce"
+
 capture_start $W/restart.pcap
 kill -9 $LEAF_PLUGIN
 pkill -9 -f "$L/run/spr-mesh-macsec/leaf.conf"
@@ -265,9 +286,9 @@ ip -n sw link set sw0 type bridge group_fwd_mask 8
 
 ENABLE=$(api $M PUT /leafRouter/macsec '{"IP":"10.88.0.2","Enable":true,"Mode":"macsec"}') || fail "re-enable after wire disable failed: $ENABLE"
 wait_for 180 leaf_secured && wait_for 60 main_secured || fail "link did not secure again"
-MAIN_SECY=$(status_field $M Interface)
+MAIN_SECY=$(status_field $M Member)
 nsx main ip addr del 10.88.0.1/24 dev eth1 2>/dev/null
-nsx main ip addr add 10.88.0.1/24 dev $MAIN_SECY
+nsx main ip addr add 10.88.0.1/24 dev mshbr0
 wait_for 30 station_ping 1 || fail "station unreachable after re-enabling MACsec"
 
 DISABLE=$(api $M PUT /leafRouter/macsec '{"IP":"10.88.0.2","Enable":false}') || fail "disable failed: $DISABLE"

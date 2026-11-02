@@ -165,6 +165,17 @@ func (f *fakeSys) DeleteLink(name string) error {
 	defer f.mu.Unlock()
 	f.op("del %s", name)
 	delete(f.infos, name)
+	for port, info := range f.infos {
+		if info.Master == name {
+			info.Master = ""
+			f.infos[port] = info
+		}
+	}
+	for i := range f.links {
+		if f.links[i].Master == name {
+			f.links[i].Master = ""
+		}
+	}
 	kept := f.links[:0]
 	for _, l := range f.links {
 		if l.Name != name {
@@ -195,12 +206,14 @@ func (f *fakeSys) NFT(ruleset string) error {
 	if f.tables == nil {
 		f.tables = map[string]string{}
 	}
-	for _, table := range []string{macsecGuardTable, macsecMSSTable} {
+	for _, table := range []string{macsecGuardTable, macsecMSSTable, meshBridgeGuardTable} {
 		if strings.Contains(ruleset, table) {
 			f.tables[table] = ruleset
 		}
 	}
 	switch {
+	case strings.Contains(ruleset, meshBridgeGuardTable):
+		f.op("nft bridge-guard")
 	case strings.Contains(ruleset, macsecGuardTable) && strings.Contains(ruleset, "udp sport 51821") && strings.Contains(ruleset, "hook egress"):
 		f.op("nft guard-wg+egress")
 	case strings.Contains(ruleset, macsecGuardTable) && strings.Contains(ruleset, "udp sport 51821"):
@@ -220,6 +233,9 @@ func (f *fakeSys) NFT(ruleset string) error {
 func (f *fakeSys) NFTDeleteTable(family, table string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := checkNFTTable(family, table); err != nil {
+		return err
+	}
 	f.op("nft-del %s %s", family, table)
 	delete(f.tables, table)
 	return nil
@@ -229,7 +245,7 @@ func (f *fakeSys) NFTList(family, table string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	live, ok := f.tables[table]
-	if !ok {
+	if err := checkNFTTable(family, table); err != nil || !ok {
 		return "", errors.New("no such table")
 	}
 	return live, nil
@@ -275,6 +291,9 @@ func (f *fakeSys) Cmd(name string, args ...string) error {
 		if len(args) >= 5 && args[4] == "wireguard" {
 			mtu = 1420
 		}
+		if len(args) >= 5 && args[3] == "address" {
+			mac, _ = net.ParseMAC(args[4])
+		}
 		f.infos[args[2]] = linkInfo{MAC: mac, MTU: mtu, MaxMTU: 65535}
 	}
 	if name == "ip" && len(args) >= 5 && args[0] == "addr" && args[1] == "replace" {
@@ -282,6 +301,19 @@ func (f *fakeSys) Cmd(name string, args ...string) error {
 			f.addrs = map[string][]string{}
 		}
 		f.addrs[args[4]] = append(f.addrs[args[4]], args[2])
+	}
+	if name == "ip" && len(args) >= 5 && args[0] == "route" && args[1] == "replace" && args[3] == "dev" {
+		if f.routes == nil {
+			f.routes = map[string][]routeEntry{}
+		}
+		dst := strings.TrimSuffix(args[2], "/32")
+		kept := []routeEntry{}
+		for _, r := range f.routes[args[4]] {
+			if r.Dst != dst {
+				kept = append(kept, r)
+			}
+		}
+		f.routes[args[4]] = append(kept, routeEntry{Family: 4, Dst: dst, Scope: "link"})
 	}
 	if name == "wg" && len(args) >= 4 && args[0] == "set" && args[2] == "peer" {
 		if f.wgPeers == nil {
@@ -1141,7 +1173,7 @@ func TestNoPeerErrorWhenMKANeverSecures(t *testing.T) {
 		t.Fatalf("no actionable error for a missing MKA peer: %q", e)
 	}
 	env.m.reconcile()
-	env.sys.secure(env.m.Status().Links[0].Interface, true, true)
+	env.sys.secure(env.m.Status().Links[0].Member, true, true)
 	env.m.reconcile()
 	if e := env.m.Status().Links[0].Error; e != "" {
 		t.Fatalf("error kept after securing: %s", e)
