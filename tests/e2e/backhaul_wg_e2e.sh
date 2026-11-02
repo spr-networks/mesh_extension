@@ -136,6 +136,10 @@ wait_for 30 station_ping 1 || fail "station cannot reach main over WireGuard wit
   && ! station_ping 1 -M do -s 1363 \
   && pass "jumbo frames off by default: ports stay at 1500, stations get 1390 with the MSS clamp" \
   || fail "jumbo off: main eth1=$(mtu main eth1) leaf eth0=$(mtu leaf eth0) vx=$(mtu leaf mshvx0)"
+ip -n sta route get 10.88.0.1 | grep -q 'mtu 1390' \
+  && pass "stations learn the 1390 byte path MTU from the bridged VXLAN port" \
+  || fail "no path MTU feedback to stations: $(ip -n sta route get 10.88.0.1 | tr '\n' ' ')"
+nsx sta ip route flush cache
 JUMBO=$(api $M PUT /leafRouter/backhaul/jumbo '{"IP":"10.88.0.2","Jumbo":true}') || fail "jumbo on failed: $JUMBO"
 
 wait_for 120 main_underlay 9000 && pass "jumbo frame test found a 9000 byte path" || fail "jumbo frame test result: $(field $M Underlay)"
