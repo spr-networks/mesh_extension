@@ -32,9 +32,9 @@ FOUND_PREBUILT_IMAGE=false
 for SERVICE in $(docker-compose config --services); do
   IS_PREBUILT=$(docker inspect \
     --format '{{ index .Config.Labels "org.supernetworks.ci" }}' \
-    "ghcr.io/spr-networks/super_${SERVICE}" 2>/dev/null || echo "false")
+    "ghcr.io/spr-networks/mesh_extension_${SERVICE}" 2>/dev/null || echo "false")
   if [ "$IS_PREBUILT" = "true" ]; then
-    docker image rm -f "ghcr.io/spr-networks/super_${SERVICE}"
+    docker image rm -f "ghcr.io/spr-networks/mesh_extension_${SERVICE}"
     FOUND_PREBUILT_IMAGE=true
   fi
 done

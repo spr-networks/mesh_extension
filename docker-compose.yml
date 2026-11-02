@@ -17,8 +17,8 @@ services:
       labels: *default-labels
       x-bake:
         tags:
-        - ghcr.io/spr-networks/super_mesh:latest${RELEASE_CHANNEL:-}
-        - ghcr.io/spr-networks/super_mesh:${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
+        - ghcr.io/spr-networks/mesh_extension_mesh:latest
+        - ghcr.io/spr-networks/mesh_extension_mesh:${RELEASE_VERSION:-latest}
     network_mode: host
     privileged: true
     logging: *default-logging
