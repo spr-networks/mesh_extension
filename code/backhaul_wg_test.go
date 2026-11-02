@@ -254,7 +254,7 @@ func TestMainWireGuardBringUpAndCleanup(t *testing.T) {
 		t.Fatalf("leaf peer not configured: %v", ops)
 	}
 	status := env.m.Status()
-	if !status.Strict || status.Links[0].Interface != "mshvx2" || status.Links[0].Mode != backhaulWireGuard || status.Links[0].Secured {
+	if !status.Strict || status.Links[0].Interface != meshBridge || status.Links[0].Member != "mshvx2" || status.Links[0].Mode != backhaulWireGuard || status.Links[0].Secured {
 		t.Fatalf("status %+v", status)
 	}
 	if l, ok := env.sys.infos["mshvx2"]; !ok || l.MTU != 1500 {
@@ -605,5 +605,28 @@ func TestJumboSwitchUpdatesBothRouters(t *testing.T) {
 	writeMeshConfig(t, mainConfigWithLeaves(1, 0))
 	if rec := doJSON(t, leafRouterJumbo, http.MethodPut, leafMACsecRequest{IP: leaf.IP, Jumbo: true}); rec.Code != 400 {
 		t.Fatalf("jumbo set on an unencrypted link: %d", rec.Code)
+	}
+}
+
+func TestWireGuardUnderlayRouteReturnsAfterLinkBounce(t *testing.T) {
+	for _, leaf := range []bool{true, false} {
+		env := setupMACsecEnv(t, leaf)
+		dev, route := "eth1", "cmd ip route replace 169.254.83.2/32 dev eth1 src 169.254.83.1"
+		if leaf {
+			dev, route = "eth0", "cmd ip route replace 169.254.83.1/32 dev eth0 src 169.254.83.2"
+			writeMeshConfig(t, wgLeafConfig(env, newTestWGPub(t), false))
+		} else {
+			config, _ := wgMainConfig(t, 9000)
+			writeMeshConfig(t, config)
+		}
+		if !contains(reconcileOps(env), route) || contains(reconcileOps(env), route) {
+			t.Fatalf("leaf=%v: underlay route not added once: %v", leaf, env.sys.Ops())
+		}
+		env.sys.mu.Lock()
+		env.sys.routes[dev] = nil
+		env.sys.mu.Unlock()
+		if ops := reconcileOps(env); !contains(ops, route) {
+			t.Fatalf("leaf=%v: underlay route not restored after %s went down and up: %v", leaf, dev, ops)
+		}
 	}
 }

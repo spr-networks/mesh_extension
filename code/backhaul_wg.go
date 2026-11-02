@@ -239,6 +239,31 @@ func (m *macsecManager) applyOnce(key string, value string, apply func() error) 
 	return nil
 }
 
+func (m *macsecManager) ensureUnderlay(key, value, dev, local, peer string) error {
+	if m.wgApplied[key] == value && !m.hasHostRoute(dev, peer) {
+		delete(m.wgApplied, key)
+	}
+	return m.applyOnce(key, value, func() error {
+		if err := m.sys.Cmd("ip", "addr", "replace", local+"/32", "dev", dev); err != nil {
+			return err
+		}
+		return m.sys.Cmd("ip", "route", "replace", peer+"/32", "dev", dev, "src", local)
+	})
+}
+
+func (m *macsecManager) hasHostRoute(dev, dst string) bool {
+	routes, err := m.sys.Routes(dev)
+	if err != nil {
+		return true
+	}
+	for _, r := range routes {
+		if r.Family == 4 && strings.TrimSuffix(r.Dst, "/32") == dst {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *macsecManager) ensureWGIface(localTunnelIP string, mtu int) error {
 	if !m.linkExists(meshWGIface) {
 		if err := m.sys.Cmd("ip", "link", "add", meshWGIface, "type", "wireguard"); err != nil {
@@ -350,12 +375,7 @@ func (m *macsecManager) mainWGLeaf(leaf LeafRouter, info linkInfo, st *MACsecLin
 		return err
 	}
 	underlay := meshUnderlay(cfg.Jumbo, cfg.UnderlayMTU)
-	if err := m.applyOnce("underlay-"+cfg.Parent+"-"+strconv.Itoa(cfg.Port), "set", func() error {
-		if err := m.sys.Cmd("ip", "addr", "replace", meshUnderlayIP(meshMainSide)+"/32", "dev", cfg.Parent); err != nil {
-			return err
-		}
-		return m.sys.Cmd("ip", "route", "replace", meshUnderlayIP(cfg.Port)+"/32", "dev", cfg.Parent, "src", meshUnderlayIP(meshMainSide))
-	}); err != nil {
+	if err := m.ensureUnderlay("underlay-"+cfg.Parent+"-"+strconv.Itoa(cfg.Port), "set", cfg.Parent, meshUnderlayIP(meshMainSide), meshUnderlayIP(cfg.Port)); err != nil {
 		return err
 	}
 	m.wgParents[cfg.Parent] = true
@@ -369,7 +389,7 @@ func (m *macsecManager) mainWGLeaf(leaf LeafRouter, info linkInfo, st *MACsecLin
 	if err := m.ensureVXLAN(name, cfg.Port, meshTunnelIP(meshMainSide), meshTunnelIP(cfg.Port), wgInnerMTU(underlay)); err != nil {
 		return err
 	}
-	st.Interface = name
+	st.Member = name
 	st.Secured = m.wgHandshakeFresh(cfg.LeafPublicKey)
 	return nil
 }
@@ -442,12 +462,7 @@ func (m *macsecManager) leafWG(cfg LeafSideMACsec, wanif string, token string, s
 	}
 	underlay := meshUnderlay(cfg.Jumbo, cfg.UnderlayMTU)
 	local := meshUnderlayIP(cfg.Port)
-	if err := m.applyOnce("underlay-"+wanif, local, func() error {
-		if err := m.sys.Cmd("ip", "addr", "replace", local+"/32", "dev", wanif); err != nil {
-			return err
-		}
-		return m.sys.Cmd("ip", "route", "replace", meshUnderlayIP(meshMainSide)+"/32", "dev", wanif, "src", local)
-	}); err != nil {
+	if err := m.ensureUnderlay("underlay-"+wanif, local, wanif, local, meshUnderlayIP(meshMainSide)); err != nil {
 		return false, err
 	}
 	if err := m.ensureWGIface(meshTunnelIP(cfg.Port), underlay-meshWGOverhead); err != nil {
@@ -492,7 +507,7 @@ func (m *macsecManager) teardownWG(wanif string) {
 }
 
 func (execMACsecSys) Cmd(name string, args ...string) error {
-	if name != "ip" && name != "wg" && name != "ethtool" {
+	if name != "ip" && name != "wg" && name != "ethtool" && name != "bridge" {
 		return errors.New("unexpected command")
 	}
 	return runQuiet(name, args...)

@@ -74,6 +74,7 @@ type routeEntry struct {
 type MACsecLinkStatus struct {
 	LeafIP    string `json:",omitempty"`
 	Interface string
+	Member    string `json:",omitempty"`
 	Parent    string
 	Port      int
 	LeafMAC   string `json:",omitempty"`
@@ -134,6 +135,10 @@ type macsecManager struct {
 	mtuRaised  map[string]time.Time
 	wgSeen     bool
 	kick       chan struct{}
+
+	bridgeGone      bool
+	bridgeGuard     string
+	bridgeGuardLive string
 }
 
 func newMACsecManager(sys macsecSys) *macsecManager {
@@ -664,7 +669,7 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 		if linksErr == nil {
 			sci, _ := macsecSCI(info.MAC, cfg.Port)
 			if link, ok := findMACsecLink(links, cfg.Parent, sci); ok {
-				st.Interface = link.Name
+				st.Member = link.Name
 				st.Secured = link.Forwarding()
 				m.applyLinkMTU(link, cfg.LinkMTU, info)
 			}
@@ -681,22 +686,27 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 		m.cleanupMainWG(wgPeers, wgVX)
 		m.wgSeen = len(wgPeers) > 0
 	}
+	m.reconcileMeshBridge(status.Links)
 	status.Strict = len(config.LeafRouters) > 0 && enabled == len(config.LeafRouters)
 	m.status = status
 }
 
 func (m *macsecManager) installGuard(ruleset string) error {
-	if ruleset == m.guardRules {
-		if live, err := m.sys.NFTList("netdev", macsecGuardTable); err == nil && live == m.guardLive {
+	return m.installTable("netdev", macsecGuardTable, ruleset, &m.guardRules, &m.guardLive)
+}
+
+func (m *macsecManager) installTable(family, table, ruleset string, rules, live *string) error {
+	if ruleset == *rules {
+		if cur, err := m.sys.NFTList(family, table); err == nil && cur == *live {
 			return nil
 		}
 	}
 	if err := m.sys.NFT(ruleset); err != nil {
-		m.guardRules = ""
+		*rules = ""
 		return err
 	}
-	m.guardRules = ruleset
-	m.guardLive, _ = m.sys.NFTList("netdev", macsecGuardTable)
+	*rules = ruleset
+	*live, _ = m.sys.NFTList(family, table)
 	return nil
 }
 
@@ -1127,7 +1137,7 @@ func checkNFTTable(family, table string) error {
 	if family != "netdev" && family != "bridge" {
 		return errors.New("unexpected nft family")
 	}
-	if table != macsecGuardTable && table != macsecMSSTable {
+	if table != macsecGuardTable && table != macsecMSSTable && table != meshBridgeGuardTable {
 		return errors.New("unexpected nft table")
 	}
 	return nil

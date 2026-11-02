@@ -44,6 +44,13 @@ field() {
   api "$1" GET /macsec/status | python3 -c "import json,sys; s=json.load(sys.stdin); print(s['Links'][0].get('$2','') if s['Links'] else '')"
 }
 
+bridge_state() { echo "br=$(ip -n main -br link show dev mshbr0 2>&1 | awk '{print $3}') eth1=$(ip -n main -br link show dev eth1 | awk '{print $3}') tables=$(nsx main nft list tables 2>&1 | tr '\n' ' ')"; }
+main_bridge_ok() {
+  local port; port=$(ip -n main -d link show dev "$1")
+  [[ $port == *"master mshbr0"* && $port == *"isolated on"* ]] \
+    && [ "$(ip -n main -br link show dev mshbr0 | awk '{print $3}')" = "$(ip -n main -br link show dev eth1 | awk '{print $3}')" ] \
+    && [[ $(nsx main nft list table bridge mesh_bridge_guard) == *"ether saddr"* ]]
+}
 leaf_secured() { [ "$(field $L Secured)" = "True" ]; }
 main_secured() { [ "$(field $M Secured)" = "True" ]; }
 main_underlay() { [ "$(field $M Underlay)" = "$1" ]; }
@@ -120,10 +127,13 @@ ENABLE=$(api $M PUT /leafRouter/backhaul '{"IP":"10.88.0.2","Enable":true}') || 
 
 wait_for 120 leaf_secured || die "WireGuard tunnel never came up on the node"
 wait_for 60 main_secured || die "WireGuard tunnel never came up on the main router"
-MAIN_VX=$(field $M Interface)
+MAIN_VX=$(field $M Member)
 pass "WireGuard tunnel up, main router VXLAN interface $MAIN_VX"
+[ "$(field $M Interface)" = mshbr0 ] && main_bridge_ok $MAIN_VX \
+  && pass "main router bridges $MAIN_VX into mshbr0, isolated, with eth1's MAC and the node MAC guard" \
+  || fail "main bridge: interface=$(field $M Interface) $(bridge_state) port=$(ip -n main -d link show dev $MAIN_VX | grep -o 'master [^ ]*\|isolated [a-z]*' | tr '\n' ' ')"
 nsx main ip addr del 10.88.0.1/24 dev eth1
-nsx main ip addr add 10.88.0.1/24 dev $MAIN_VX
+nsx main ip addr add 10.88.0.1/24 dev mshbr0
 
 ports | grep -qx eth0 && fail "raw uplink still bridged" || pass "raw uplink removed from br0"
 ports | grep -qx mshvx0 && pass "VXLAN port bridged into br0" || fail "VXLAN port not bridged"
@@ -207,6 +217,14 @@ wait_for 30 ports_at_1500 && [ -z "$(field $M Underlay)" ] && wait_for 30 statio
   && pass "turning jumbo frames off restores both ports to 1500 and keeps the link up" \
   || fail "jumbo off: main eth1=$(mtu main eth1) leaf eth0=$(mtu leaf eth0) vx=$(mtu leaf mshvx0) underlay=$(field $M Underlay)"
 
+underlay_routes() { echo "leaf: $(ip -n leaf -4 route show dev eth0 | tr '\n' ' ') main: $(ip -n main -4 route show dev eth1 | tr '\n' ' ')"; }
+ip -n leaf link set eth0 down; sleep 2; ip -n leaf link set eth0 up
+wait_for 30 station_ping 1 && pass "link recovers after the node uplink goes down and up" \
+  || fail "no recovery after the node uplink went down and up: $(underlay_routes)"
+ip -n main link set eth1 down; sleep 2; ip -n main link set eth1 up
+wait_for 30 station_ping 1 && pass "link recovers after the main router port goes down and up" \
+  || fail "no recovery after the main router port went down and up: $(underlay_routes)"
+
 nsx sw nft -f - << 'EOF'
 table bridge block {
   chain forward {
@@ -223,6 +241,8 @@ wait_for 60 sh -c "ip -n leaf -o link show master br0 | grep -q ' eth0'" \
   && [ ! -f $L/configs/base/mesh_macsec_required ] && wait_for 30 station_ping 1 \
   && pass "turning WireGuard off on the main router also turns it off on the node while the tunnel is blocked" \
   || fail "WireGuard off did not restore the plaintext uplink"
+! ip -n main link show mshbr0 >/dev/null 2>&1 && ! nsx main nft list table bridge mesh_bridge_guard >/dev/null 2>&1 \
+  && pass "main bridge and its guard removed with the last link" || fail "mshbr0 or its guard left behind: $(bridge_state) status=$(api $M GET /macsec/status)"
 
 if [ $FAILED = 0 ]; then
   echo "ALL WIREGUARD E2E CHECKS PASSED"
