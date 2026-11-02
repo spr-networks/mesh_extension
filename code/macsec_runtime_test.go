@@ -945,6 +945,22 @@ func TestParseLinkInfoAndRoute(t *testing.T) {
 	if _, err := parseLinkInfo([]byte(`[{"ifname":"eth0","mtu":1500,"address":"zz:11"}]`)); err == nil {
 		t.Error("malformed address accepted")
 	}
+	if _, err := parseLinkInfo([]byte(`[{"ifname":"mshvx2","mtu":1500,"address":"82:0a:3f:83:a8:01","max_mtu":65535,"linkinfo":{"info_kind":"vxlan","info_data":{"id":2,"remote":"169.254.84.2"fan-map ,"local":"169.254.84.1","port":4789}}}]`)); err == nil {
+		t.Fatal("ubuntu iproute2 vxlan details are expected to be unparseable")
+	}
+	for _, name := range []string{"mshvx0", "mshvx2"} {
+		args := linkInfoArgs(name)
+		if args[0] == "-d" {
+			t.Errorf("%s queried with details: %v", name, args)
+		}
+		vx, err := parseLinkInfo([]byte(`[{"ifindex":12,"ifname":"` + name + `","flags":["BROADCAST","MULTICAST"],"mtu":1500,"qdisc":"noop","master":"br0","operstate":"DOWN","link_type":"ether","address":"ba:ef:ac:c5:b3:c8","broadcast":"ff:ff:ff:ff:ff:ff"}]`))
+		if err != nil || vx.MTU != 1500 || vx.Master != "br0" {
+			t.Fatalf("%s: %+v %v", name, vx, err)
+		}
+	}
+	if args := linkInfoArgs("eth1"); args[0] != "-d" {
+		t.Errorf("parent queried without details, max MTU lost: %v", args)
+	}
 	dev, err := parseRouteDev([]byte(`[{"dst":"192.168.2.10","dev":"eth1","prefsrc":"192.168.2.1"}]`))
 	if err != nil || dev != "eth1" {
 		t.Fatalf("%q %v", dev, err)

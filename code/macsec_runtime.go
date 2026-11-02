@@ -989,6 +989,13 @@ func (execMACsecSys) Links() ([]macsecLink, error) {
 	return parseMACsecLinks(out)
 }
 
+func linkInfoArgs(name string) []string {
+	if strings.HasPrefix(name, meshVXLANPrefix) {
+		return []string{"-j", "link", "show", "dev", name}
+	}
+	return []string{"-d", "-j", "link", "show", "dev", name}
+}
+
 func parseLinkInfo(data []byte) (linkInfo, error) {
 	var entries []struct {
 		Address string `json:"address"`
@@ -1017,7 +1024,7 @@ func (execMACsecSys) LinkInfo(name string) (linkInfo, error) {
 	if err := checkIfname(name); err != nil {
 		return linkInfo{}, err
 	}
-	out, err := exec.Command("ip", "-d", "-j", "link", "show", "dev", name).Output()
+	out, err := exec.Command("ip", linkInfoArgs(name)...).Output()
 	if err != nil {
 		return linkInfo{}, err
 	}
