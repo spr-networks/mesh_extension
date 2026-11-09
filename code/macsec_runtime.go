@@ -464,7 +464,13 @@ func (m *macsecManager) pinPlaintextRoutes(parent string, info linkInfo) {
 	if err != nil {
 		return
 	}
+	first := map[string]bool{}
 	for _, route := range routes {
+		key := fmt.Sprintf("%d %s %d", route.Family, route.Dst, route.Metric)
+		if first[key] {
+			continue
+		}
+		first[key] = true
 		if route.MTU != 0 && route.MTU <= orig {
 			continue
 		}

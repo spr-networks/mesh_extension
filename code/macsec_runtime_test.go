@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -420,9 +421,11 @@ func (f *fakeSys) PinRouteMTU(dev string, r routeEntry, mtu int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.op("route-mtu %s %s %d", dev, r.Dst, mtu)
-	for i := range f.routes[dev] {
-		if f.routes[dev][i].Dst == r.Dst {
-			f.routes[dev][i].MTU = mtu
+	for i, route := range f.routes[dev] {
+		if route.Family == r.Family && route.Dst == r.Dst && route.Metric == r.Metric {
+			r.MTU = mtu
+			f.routes[dev][i] = r
+			break
 		}
 	}
 	return nil
@@ -1224,6 +1227,39 @@ func TestPlaintextRoutesKeepOriginalMTUOnRaisedParent(t *testing.T) {
 	env.m.reconcile()
 	if indexOf(env.sys.Ops()[before:], "route-mtu") >= 0 {
 		t.Fatal("pinned routes re-pinned every pass")
+	}
+}
+
+func TestDuplicatePlaintextRoutesPinnedOnce(t *testing.T) {
+	env := setupMACsecEnv(t, false)
+	env.sys.routes = map[string][]routeEntry{"eth1": {
+		{Family: 4, Dst: "192.168.1.32/30", Scope: "link"},
+		{Family: 4, Dst: "192.168.1.32/30", Protocol: "kernel", Scope: "link", PrefSrc: "192.168.1.33"},
+		{Family: 4, Dst: "192.168.1.80/30", Protocol: "kernel", Scope: "link", PrefSrc: "192.168.1.81", MTU: 1500},
+		{Family: 4, Dst: "192.168.1.80/30", Protocol: "kernel", Scope: "link", PrefSrc: "192.168.1.81"},
+		{Family: 6, Dst: "fe80::/64", Protocol: "kernel", Metric: 256},
+		{Family: 6, Dst: "fe80::/64", Protocol: "kernel", Metric: 256},
+	}}
+	writeMeshConfig(t, mainConfigWithLeaves(1, 1))
+	env.m.reconcile()
+	ops := env.sys.Ops()
+	pins := []string{}
+	for _, op := range ops {
+		if strings.HasPrefix(op, "route-mtu") {
+			pins = append(pins, op)
+		}
+	}
+	want := []string{"route-mtu eth1 192.168.1.32/30 1500", "route-mtu eth1 fe80::/64 1500"}
+	if !reflect.DeepEqual(pins, want) {
+		t.Fatalf("pins = %v, want only the first route of each prefix: %v", pins, want)
+	}
+	if route := env.sys.routes["eth1"][0]; route.PrefSrc != "" || route.MTU != 1500 {
+		t.Fatalf("first route pinned with another route's attributes: %+v", route)
+	}
+	before := len(ops)
+	env.m.reconcile()
+	if indexOf(env.sys.Ops()[before:], "route-mtu") >= 0 {
+		t.Fatalf("duplicate routes re-pinned every pass: %v", env.sys.Ops()[before:])
 	}
 }
 
