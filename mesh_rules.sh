@@ -26,7 +26,7 @@ mesh_uplink_bridged() {
   for port in "$MESH_BRIF_DIR"/*; do
     port=${port##*/}
     case "$port" in
-      macsec[0-9]*|"$MESH_UPLINK") return 0 ;;
+      macsec[0-9]*|mshvx[0-9]*|"$MESH_UPLINK") return 0 ;;
     esac
   done
   return 1
@@ -202,6 +202,7 @@ table inet filter {
     iifname "$MESH_UPLINK" ip saddr 169.254.83.1 udp sport 51821 udp dport 51821 counter accept
     iifname "wgmesh" ip saddr 169.254.84.1 udp dport 4789 counter accept
     counter jump F_EST_RELATED
+    iifname "br0" icmp type echo-request counter accept
 
     # Mark whether the input came from upstream (wan:in) or local network (lan:in)
     $(if [ "$WANIF" ]; then echo "iifname $WANIF log prefix \"wan:in \" group 0"; fi)

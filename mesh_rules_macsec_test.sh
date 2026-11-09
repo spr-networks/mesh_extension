@@ -102,4 +102,9 @@ run_rules
 touch "$BRIF/eth1"
 wait_for_log 'dhclient br0' || fail "DHCP not started after revert to plaintext"
 
+rm -f "$BRIF"/*
+run_rules
+touch "$BRIF/mshvx0"
+wait_for_log 'dhclient br0' || fail "DHCP not started once the WireGuard VXLAN port was bridged"
+
 echo "mesh_rules MACsec tests passed"

@@ -112,6 +112,7 @@ openssl x509 -req -in $W/leaf.csr -CA $W/ca.crt -CAkey $W/ca.key -CAcreateserial
 python3 -c 'import json,sys; print(json.dumps({"LeafRouters":[{"APIToken":sys.argv[1],"IP":"10.88.0.2","TLSCA":open(sys.argv[2]).read()}]}))' \
   "$TOKEN" $W/ca.crt > $M/configs/mesh/config.json
 
+nsx leaf ip link add docker0 type bridge
 nsx leaf env PATH=$W/fakebin:$PATH WANIF=eth0 LANIF= DOCKERIF=docker0 DOCKERNET=172.17.0.0/16 \
   INTERFACES_CONFIG=/nonexistent MESH_MACSEC_FLAG=$L/configs/base/mesh_macsec_required \
   bash $REPO/mesh_rules.sh > $W/rules.log 2>&1
@@ -180,6 +181,7 @@ wait_for 15 sh -c "ip -n main -4 route show dev eth1 | grep '^10.89.0.0/24' | gr
 
 wait_for 30 station_ping 1 || die "station cannot reach main over MACsec"
 station_ping 2 -M do -s 1472 && pass "AP/VLAN station sends full 1500 byte packets over MACsec" || fail "1500 byte DF ping failed"
+nsx main ping -c 2 -W 2 10.88.0.2 >/dev/null 2>&1 && pass "node answers pings on br0 over MACsec" || fail "node does not answer pings on br0 over MACsec"
 
 capture_start $W/enc.pcap
 station_ping 5 -i 0.2
