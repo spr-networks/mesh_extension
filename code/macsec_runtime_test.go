@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -415,20 +414,6 @@ func (f *fakeSys) Routes(dev string) ([]routeEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]routeEntry{}, f.routes[dev]...), nil
-}
-
-func (f *fakeSys) PinRouteMTU(dev string, r routeEntry, mtu int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.op("route-mtu %s %s %d", dev, r.Dst, mtu)
-	for i, route := range f.routes[dev] {
-		if route.Family == r.Family && route.Dst == r.Dst && route.Metric == r.Metric {
-			r.MTU = mtu
-			f.routes[dev][i] = r
-			break
-		}
-	}
-	return nil
 }
 
 func (f *fakeSys) secure(name string, up, encrypt bool) {
@@ -1202,81 +1187,7 @@ func TestOriginalMTURestoredAfterPluginRestart(t *testing.T) {
 	}
 }
 
-func TestPlaintextRoutesKeepOriginalMTUOnRaisedParent(t *testing.T) {
-	env := setupMACsecEnv(t, false)
-	env.sys.routes = map[string][]routeEntry{"eth1": {
-		{Family: 4, Dst: "192.168.2.4/30", Protocol: "kernel", Scope: "link", PrefSrc: "192.168.2.5"},
-		{Family: 4, Dst: "10.0.0.0/8", Gateway: "192.168.2.6", Metric: 50},
-		{Family: 4, Dst: "192.168.2.8/30", Protocol: "kernel", Scope: "link", MTU: 1400},
-		{Family: 4, Dst: "169.254.83.2", Scope: "link", PrefSrc: "169.254.83.1"},
-	}}
-	writeMeshConfig(t, mainConfigWithLeaves(1, 1))
-	env.m.reconcile()
-	ops := env.sys.Ops()
-	if indexOf(ops, "route-mtu eth1 169.254.83.2") >= 0 {
-		t.Fatalf("encrypted underlay route pinned to the plaintext MTU: %v", ops)
-	}
-	raise := indexOf(ops, "mtu eth1 1532")
-	if raise < 0 || !contains(ops, "route-mtu eth1 192.168.2.4/30 1500") || !contains(ops, "route-mtu eth1 10.0.0.0/8 1500") {
-		t.Fatalf("plaintext routes on the raised LAN parent not pinned to 1500: %v", ops)
-	}
-	if contains(ops, "route-mtu eth1 192.168.2.8/30 1500") {
-		t.Fatal("raised a route MTU an admin had set lower")
-	}
-	before := len(ops)
-	env.m.reconcile()
-	if indexOf(env.sys.Ops()[before:], "route-mtu") >= 0 {
-		t.Fatal("pinned routes re-pinned every pass")
-	}
-}
-
-func TestDuplicatePlaintextRoutesPinnedOnce(t *testing.T) {
-	env := setupMACsecEnv(t, false)
-	env.sys.routes = map[string][]routeEntry{"eth1": {
-		{Family: 4, Dst: "192.168.1.32/30", Scope: "link"},
-		{Family: 4, Dst: "192.168.1.32/30", Protocol: "kernel", Scope: "link", PrefSrc: "192.168.1.33"},
-		{Family: 4, Dst: "192.168.1.80/30", Protocol: "kernel", Scope: "link", PrefSrc: "192.168.1.81", MTU: 1500},
-		{Family: 4, Dst: "192.168.1.80/30", Protocol: "kernel", Scope: "link", PrefSrc: "192.168.1.81"},
-		{Family: 6, Dst: "fe80::/64", Protocol: "kernel", Metric: 256},
-		{Family: 6, Dst: "fe80::/64", Protocol: "kernel", Metric: 256},
-	}}
-	writeMeshConfig(t, mainConfigWithLeaves(1, 1))
-	env.m.reconcile()
-	ops := env.sys.Ops()
-	pins := []string{}
-	for _, op := range ops {
-		if strings.HasPrefix(op, "route-mtu") {
-			pins = append(pins, op)
-		}
-	}
-	want := []string{"route-mtu eth1 192.168.1.32/30 1500", "route-mtu eth1 fe80::/64 1500"}
-	if !reflect.DeepEqual(pins, want) {
-		t.Fatalf("pins = %v, want only the first route of each prefix: %v", pins, want)
-	}
-	if route := env.sys.routes["eth1"][0]; route.PrefSrc != "" || route.MTU != 1500 {
-		t.Fatalf("first route pinned with another route's attributes: %+v", route)
-	}
-	before := len(ops)
-	env.m.reconcile()
-	if indexOf(env.sys.Ops()[before:], "route-mtu") >= 0 {
-		t.Fatalf("duplicate routes re-pinned every pass: %v", env.sys.Ops()[before:])
-	}
-}
-
-func TestNoRoutePinningWhenParentWasNotRaised(t *testing.T) {
-	env := setupMACsecEnv(t, false)
-	info := env.sys.infos["eth1"]
-	info.MTU = 9000
-	env.sys.infos["eth1"] = info
-	env.sys.routes = map[string][]routeEntry{"eth1": {{Family: 4, Dst: "192.168.2.4/30"}}}
-	writeMeshConfig(t, mainConfigWithLeaves(1, 1))
-	env.m.reconcile()
-	if indexOf(env.sys.Ops(), "route-mtu") >= 0 {
-		t.Fatalf("pinned routes on a jumbo LAN the plugin did not change: %v", env.sys.Ops())
-	}
-}
-
-func TestParseRoutesAndReplaceArgs(t *testing.T) {
+func TestParseRoutes(t *testing.T) {
 	routes, err := parseRoutes([]byte(`[
 		{"dst":"10.9.0.0/24","protocol":"kernel","scope":"link","prefsrc":"10.9.0.1","flags":[]},
 		{"dst":"10.9.1.0/24","gateway":"10.9.0.254","metric":50,"flags":[],"metrics":[{"mtu":1500}]},
@@ -1289,16 +1200,8 @@ func TestParseRoutesAndReplaceArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(routes) != 3 || routes[1].MTU != 1500 || routes[2].Dst != "default" {
+	if len(routes) != 3 || routes[0].Dst != "10.9.0.0/24" || routes[1].Metric != 50 || routes[2].Dst != "default" {
 		t.Fatalf("%+v", routes)
-	}
-	got := strings.Join(routeReplaceArgs("eth1", routes[0], 1500), " ")
-	if got != "-4 route replace 10.9.0.0/24 dev eth1 proto kernel scope link src 10.9.0.1 mtu lock 1500" {
-		t.Fatalf("%s", got)
-	}
-	got = strings.Join(routeReplaceArgs("eth1", routes[1], 1500), " ")
-	if got != "-4 route replace 10.9.1.0/24 via 10.9.0.254 dev eth1 metric 50 mtu lock 1500" {
-		t.Fatalf("%s", got)
 	}
 }
 

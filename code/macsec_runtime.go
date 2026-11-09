@@ -57,7 +57,6 @@ type macsecSys interface {
 	SendFrame(dev string, frame []byte) error
 	Exchange(dev string, frame []byte, timeout time.Duration, handle func([]byte) bool) error
 	RecvFrames(dev string, timeout time.Duration, handle func([]byte) bool) error
-	PinRouteMTU(dev string, route routeEntry, mtu int) error
 }
 
 type routeEntry struct {
@@ -68,7 +67,6 @@ type routeEntry struct {
 	Scope    string
 	PrefSrc  string
 	Metric   int
-	MTU      int
 }
 
 type MACsecLinkStatus struct {
@@ -455,34 +453,6 @@ func (m *macsecManager) restoreUnusedMTU() {
 	}
 }
 
-func (m *macsecManager) pinPlaintextRoutes(parent string, info linkInfo) {
-	orig, raised := m.origMTU[parent]
-	if !raised || orig >= info.MTU {
-		return
-	}
-	routes, err := m.sys.Routes(parent)
-	if err != nil {
-		return
-	}
-	first := map[string]bool{}
-	for _, route := range routes {
-		key := fmt.Sprintf("%d %s %d", route.Family, route.Dst, route.Metric)
-		if first[key] {
-			continue
-		}
-		first[key] = true
-		if route.MTU != 0 && route.MTU <= orig {
-			continue
-		}
-		if isMeshUnderlayRoute(route.Dst) {
-			continue
-		}
-		if err := m.sys.PinRouteMTU(parent, route, orig); err != nil {
-			fmt.Println("[-] macsec: could not pin route MTU on", parent, route.Dst, err)
-		}
-	}
-}
-
 func (m *macsecManager) restartIfStuck(id string, secured bool) {
 	if secured {
 		delete(m.restarted, id)
@@ -561,7 +531,6 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 	}
 
 	desired := map[string]bool{}
-	pinned := map[string]bool{}
 	wgPeers := map[string]bool{}
 	wgVX := map[string]bool{}
 	m.wgMainMTU = 0
@@ -613,10 +582,6 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 			if cfg.Jumbo {
 				info = m.raiseParentMTUTo(cfg.Parent, info, meshJumboMTU)
 			}
-			if !pinned[cfg.Parent] {
-				pinned[cfg.Parent] = true
-				m.pinPlaintextRoutes(cfg.Parent, info)
-			}
 			wgPeers[cfg.LeafPublicKey] = true
 			wgVX[meshVXLANMain(cfg.Port)] = true
 			if err := m.mainWGLeaf(leaf, info, &st); err != nil {
@@ -657,10 +622,6 @@ func (m *macsecManager) reconcileMain(config MeshConfig) {
 		}
 		if cfg.Jumbo {
 			info = m.raiseParentMTU(cfg.Parent, info)
-		}
-		if !pinned[cfg.Parent] {
-			pinned[cfg.Parent] = true
-			m.pinPlaintextRoutes(cfg.Parent, info)
 		}
 		desired[inst.ID] = true
 		running, err := m.ensureMKA(inst, info.MAC)
@@ -1224,7 +1185,6 @@ func parseRoutes(data []byte, family int) ([]routeEntry, error) {
 		PrefSrc  string            `json:"prefsrc"`
 		Metric   int               `json:"metric"`
 		Nexthops []json.RawMessage `json:"nexthops"`
-		Metrics  []map[string]int  `json:"metrics"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -1245,13 +1205,7 @@ func parseRoutes(data []byte, family int) ([]routeEntry, error) {
 		if (r.Protocol != "" && !routeWordRE.MatchString(r.Protocol)) || (r.Scope != "" && !routeWordRE.MatchString(r.Scope)) {
 			continue
 		}
-		route := routeEntry{Family: family, Dst: r.Dst, Gateway: r.Gateway, Protocol: r.Protocol, Scope: r.Scope, PrefSrc: r.PrefSrc, Metric: r.Metric}
-		for _, m := range r.Metrics {
-			if mtu, ok := m["mtu"]; ok {
-				route.MTU = mtu
-			}
-		}
-		routes = append(routes, route)
+		routes = append(routes, routeEntry{Family: family, Dst: r.Dst, Gateway: r.Gateway, Protocol: r.Protocol, Scope: r.Scope, PrefSrc: r.PrefSrc, Metric: r.Metric})
 	}
 	return routes, nil
 }
@@ -1273,34 +1227,6 @@ func (execMACsecSys) Routes(dev string) ([]routeEntry, error) {
 		routes = append(routes, parsed...)
 	}
 	return routes, nil
-}
-
-func routeReplaceArgs(dev string, r routeEntry, mtu int) []string {
-	args := []string{"-" + strconv.Itoa(r.Family), "route", "replace", r.Dst}
-	if r.Gateway != "" {
-		args = append(args, "via", r.Gateway)
-	}
-	args = append(args, "dev", dev)
-	if r.Protocol != "" {
-		args = append(args, "proto", r.Protocol)
-	}
-	if r.Scope != "" {
-		args = append(args, "scope", r.Scope)
-	}
-	if r.PrefSrc != "" {
-		args = append(args, "src", r.PrefSrc)
-	}
-	if r.Metric != 0 {
-		args = append(args, "metric", strconv.Itoa(r.Metric))
-	}
-	return append(args, "mtu", "lock", strconv.Itoa(mtu))
-}
-
-func (execMACsecSys) PinRouteMTU(dev string, r routeEntry, mtu int) error {
-	if err := checkIfname(dev); err != nil {
-		return err
-	}
-	return runQuiet("ip", routeReplaceArgs(dev, r, mtu)...)
 }
 
 func (execMACsecSys) SendFrame(dev string, frame []byte) error {

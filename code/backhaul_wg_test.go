@@ -236,7 +236,6 @@ func TestMainWireGuardBringUpAndCleanup(t *testing.T) {
 	ops := env.sys.Ops()
 	for _, want := range []string{
 		"mtu eth1 9000",
-		"route-mtu eth1 192.168.2.4/30 1500",
 		"cmd ip addr replace 169.254.83.1/32 dev eth1",
 		"cmd ip route replace 169.254.83.2/32 dev eth1 src 169.254.83.1",
 		"cmd ip link add wgmesh type wireguard",
@@ -247,6 +246,11 @@ func TestMainWireGuardBringUpAndCleanup(t *testing.T) {
 	} {
 		if !contains(ops, want) {
 			t.Errorf("missing %q in %v", want, ops)
+		}
+	}
+	for _, op := range ops {
+		if strings.Contains(op, "192.168.2.4/30") {
+			t.Fatalf("plaintext LAN route touched: %v", ops)
 		}
 	}
 	peer := indexOf(ops, "cmd wg set wgmesh peer "+leafPub)
@@ -485,7 +489,7 @@ func TestJumboOffLeavesPortMTUAlone(t *testing.T) {
 	env.m.reconcile()
 	ops := env.sys.Ops()
 	for _, op := range ops {
-		if strings.HasPrefix(op, "mtu eth1") || strings.HasPrefix(op, "route-mtu") || strings.HasPrefix(op, "cmd ethtool") {
+		if strings.HasPrefix(op, "mtu eth1") || strings.HasPrefix(op, "cmd ethtool") {
 			t.Fatalf("port touched without jumbo frames: %v", ops)
 		}
 	}

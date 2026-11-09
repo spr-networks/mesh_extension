@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,15 +70,6 @@ func wgCapableUnderlay(info linkInfo) int {
 
 func meshUnderlayIP(port int) string {
 	return fmt.Sprintf("169.254.83.%d", port)
-}
-
-func isMeshUnderlayRoute(dst string) bool {
-	ip := net.ParseIP(strings.TrimSuffix(dst, "/32"))
-	if ip == nil || ip.To4() == nil {
-		return false
-	}
-	ip4 := ip.To4()
-	return ip4[0] == 169 && ip4[1] == 254 && ip4[2] == 83
 }
 
 func meshTunnelIP(port int) string {
