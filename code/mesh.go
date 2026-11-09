@@ -209,6 +209,7 @@ func initMesh() {
 	go meshNeighborLoop()
 	go gMACsec.run()
 	go macsecPendingLoop()
+	go leafSyncLoop()
 
 }
 
@@ -476,11 +477,11 @@ func tinyRoute(ip string, delta uint32) string {
 	return routeIP
 }
 
-func callAPIDeviceSync(IP string, Token string, TLSCA string, devices map[string]DeviceEntry) {
+func callAPIDeviceSync(IP string, Token string, TLSCA string, devices map[string]DeviceEntry) bool {
 	jsonValue, _ := json.Marshal(devices)
 	req, err := http.NewRequest(http.MethodPut, "https://"+IP+"/devices", bytes.NewBuffer(jsonValue))
 	if err != nil {
-		return
+		return false
 	}
 	req.Header.Add("Authorization", "Bearer "+Token)
 
@@ -489,7 +490,7 @@ func callAPIDeviceSync(IP string, Token string, TLSCA string, devices map[string
 	resp, err := c.Do(req)
 	if err != nil {
 		fmt.Println("API device sync request failed", IP, err)
-		return
+		return false
 	}
 
 	defer resp.Body.Close()
@@ -497,9 +498,95 @@ func callAPIDeviceSync(IP string, Token string, TLSCA string, devices map[string
 
 	if resp.StatusCode != http.StatusOK {
 		fmt.Println("API device sync request failed", resp.StatusCode)
-		return
+		return false
 	}
 
+	return true
+}
+
+type leafSyncState struct {
+	sync.Mutex
+	version uint64
+	devices bool
+	otp     bool
+}
+
+var leafSyncMtx sync.Mutex
+var leafSyncDevices map[string]DeviceEntry
+var leafSyncVersion uint64
+var leafSyncStates = map[string]*leafSyncState{}
+
+func leafSyncStateFor(IP string) *leafSyncState {
+	leafSyncMtx.Lock()
+	defer leafSyncMtx.Unlock()
+	st := leafSyncStates[IP]
+	if st == nil {
+		st = &leafSyncState{}
+		leafSyncStates[IP] = st
+	}
+	return st
+}
+
+func forEachLeaf(leaves []LeafRouter, fn func(LeafRouter)) {
+	var wg sync.WaitGroup
+	for _, entry := range leaves {
+		wg.Add(1)
+		go func(entry LeafRouter) {
+			defer wg.Done()
+			fn(entry)
+		}(entry)
+	}
+	wg.Wait()
+}
+
+func syncLeafDevices(entry LeafRouter, retry bool) {
+	st := leafSyncStateFor(entry.IP)
+	st.Lock()
+	defer st.Unlock()
+	leafSyncMtx.Lock()
+	devices, version := leafSyncDevices, leafSyncVersion
+	leafSyncMtx.Unlock()
+	if devices == nil || (st.version == version && !(retry && st.devices)) {
+		return
+	}
+	st.version = version
+	st.devices = !callAPIDeviceSync(entry.IP, entry.APIToken, entry.TLSCA, devices)
+}
+
+func syncLeafOTP(entry LeafRouter) {
+	st := leafSyncStateFor(entry.IP)
+	st.Lock()
+	defer st.Unlock()
+	st.otp = !callAPISetOTP(entry.IP, entry.APIToken, entry.TLSCA)
+}
+
+func retryLeafSyncs() {
+	if isLeafRouter() {
+		return
+	}
+	Configmtx.RLock()
+	config := loadConfigLocked()
+	Configmtx.RUnlock()
+
+	forEachLeaf(config.LeafRouters, func(entry LeafRouter) {
+		st := leafSyncStateFor(entry.IP)
+		st.Lock()
+		devices, otp := st.devices, st.otp
+		st.Unlock()
+		if devices {
+			syncLeafDevices(entry, true)
+		}
+		if otp {
+			syncLeafOTP(entry)
+		}
+	})
+}
+
+func leafSyncLoop() {
+	for {
+		time.Sleep(30 * time.Second)
+		retryLeafSyncs()
+	}
 }
 
 func syncDevices(w http.ResponseWriter, r *http.Request) {
@@ -510,15 +597,19 @@ func syncDevices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	leafSyncMtx.Lock()
+	leafSyncDevices = devices
+	leafSyncVersion++
+	leafSyncMtx.Unlock()
+
 	Configmtx.Lock()
 	config := loadConfigLocked()
 	Configmtx.Unlock()
 
 	//for each subscribed leaf node, sync the devices
-	for _, entry := range config.LeafRouters {
-		callAPIDeviceSync(entry.IP, entry.APIToken, entry.TLSCA, devices)
-	}
-
+	forEachLeaf(config.LeafRouters, func(entry LeafRouter) {
+		syncLeafDevices(entry, false)
+	})
 }
 
 func syncOTP(w http.ResponseWriter, r *http.Request) {
@@ -527,11 +618,8 @@ func syncOTP(w http.ResponseWriter, r *http.Request) {
 	config := loadConfigLocked()
 	Configmtx.Unlock()
 
-	for _, entry := range config.LeafRouters {
-		//propagate the OTP settings from main to leaf node
-		callAPISetOTP(entry.IP, entry.APIToken, entry.TLSCA)
-	}
-
+	//propagate the OTP settings from main to leaf node
+	forEachLeaf(config.LeafRouters, syncLeafOTP)
 }
 
 func callAPISetSSID(IP string, Token string, TLSCA string, SSID string, iface string) {
@@ -561,19 +649,19 @@ func callAPISetSSID(IP string, Token string, TLSCA string, SSID string, iface st
 	}
 }
 
-func callAPISetOTP(IP string, Token string, TLSCA string) {
+func callAPISetOTP(IP string, Token string, TLSCA string) bool {
 	Tokensmtx.Lock()
 	settings, err := otpLoadLocked()
 	Tokensmtx.Unlock()
 	if err != nil && len(settings.OTPUsers) == 0 {
-		return
+		return true
 	}
 
 	request := OTPSettingsRequest{Settings: settings, Token: Token}
 	jsonValue, _ := json.Marshal(request)
 	req, err := http.NewRequest(http.MethodPut, "https://"+IP+"/plugins/mesh/setOTP", bytes.NewBuffer(jsonValue))
 	if err != nil {
-		return
+		return false
 	}
 	req.Header.Add("Authorization", "Bearer "+Token)
 
@@ -582,7 +670,7 @@ func callAPISetOTP(IP string, Token string, TLSCA string) {
 	resp, err := c.Do(req)
 	if err != nil {
 		fmt.Println("set OTP Failure")
-		return
+		return false
 	}
 
 	defer resp.Body.Close()
@@ -590,8 +678,9 @@ func callAPISetOTP(IP string, Token string, TLSCA string) {
 
 	if resp.StatusCode != http.StatusOK {
 		fmt.Println("API Set OTP Failed", IP, resp.StatusCode)
-		return
+		return false
 	}
+	return true
 }
 
 type InterfaceConfig struct {
@@ -699,14 +788,14 @@ func setSSID(w http.ResponseWriter, r *http.Request) {
 
 	Configmtx.Unlock()
 
-	for _, entry := range config.LeafRouters {
+	forEachLeaf(config.LeafRouters, func(entry LeafRouter) {
 		ifaces := callAPIGetInterfaces(entry.IP, entry.APIToken, entry.TLSCA)
 		for _, iface := range ifaces {
 			if iface.Enabled && iface.Type == "AP" {
 				callAPISetSSID(entry.IP, entry.APIToken, entry.TLSCA, SSID, iface.Name)
 			}
 		}
-	}
+	})
 
 }
 
