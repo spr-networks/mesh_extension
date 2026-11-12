@@ -315,23 +315,23 @@ func isLeafRouter() bool {
 	return false
 }
 
-func callParentAPI(Path string, jsonValue []byte) {
+func callParentAPI(Path string, jsonValue []byte) bool {
 	Configmtx.Lock()
 	config := loadConfigLocked()
 	Configmtx.Unlock()
 
 	if config.ParentIP == "" {
-		return
+		return false
 	}
 
 	if config.ParentAPIToken == "" {
 		fmt.Println("[-] Mesh leaf not configured with parent API token, aborting call to", Path)
-		return
+		return false
 	}
 
 	req, err := http.NewRequest(http.MethodPut, "https://"+config.ParentIP+"/"+Path, bytes.NewBuffer(jsonValue))
 	if err != nil {
-		return
+		return false
 	}
 	req.Header.Add("Authorization", "Bearer "+config.ParentAPIToken)
 
@@ -340,7 +340,7 @@ func callParentAPI(Path string, jsonValue []byte) {
 	resp, err := c.Do(req)
 	if err != nil {
 		fmt.Println("API Parent Event Push Failed", config.ParentIP, Path, err)
-		return
+		return false
 	}
 
 	defer resp.Body.Close()
@@ -348,16 +348,20 @@ func callParentAPI(Path string, jsonValue []byte) {
 
 	if resp.StatusCode != http.StatusOK {
 		fmt.Println("API Parent Event Push Failed", config.ParentIP, Path, resp.StatusCode)
-		return
+		return false
 	}
-
+	return true
 }
 
 //func callParentAPI(Path string, jsonValue []bytes) {
 
-func publishConnectEventParent(event WifiConnectEvent) {
+func publishConnectEventParent(event WifiConnectEvent) bool {
 	jsonValue, _ := json.Marshal(event)
-	go callParentAPI("reportPSKAuthSuccess", jsonValue)
+	if !strings.Contains(event.Iface, ".ap") {
+		go callParentAPI("reportPSKAuthSuccess", jsonValue)
+		return true
+	}
+	return callParentAPI("reportPSKAuthSuccess", jsonValue)
 }
 
 func publishConnectFailureEventParent(event WifiConnectFailureEvent) {
@@ -394,7 +398,10 @@ func wifiConnect(w http.ResponseWriter, r *http.Request) {
 
 	event.Router = LeafRouterID()
 
-	publishConnectEventParent(event)
+	if !publishConnectEventParent(event) {
+		http.Error(w, "parent did not authorize station", http.StatusForbidden)
+		return
+	}
 
 	//set br0 as the bridge master
 	err = exec.Command("ip", "link", "set", "dev", event.Iface, "master", BRIDGE_IFACE).Run()
